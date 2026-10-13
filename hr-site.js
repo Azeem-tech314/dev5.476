@@ -1,0 +1,728 @@
+/* happyreturnslocations.us — bundled client-side JS */
+
+(function(){
+  function pad(n){return n<10?'0'+n:''+n;}
+  function fmtDate(d){
+    var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return days[d.getDay()]+', '+months[d.getMonth()]+' '+d.getDate()+', '+d.getFullYear();
+  }
+  function run(){
+    var dateEl=document.getElementById('hr-deadline-date');
+    var winEl=document.getElementById('hr-deadline-window');
+    var out=document.getElementById('hr-deadline-result');
+    if(!dateEl.value){out.innerHTML='<div style="background:var(--red-bg);border:2px solid #991B1B;border-radius:8px;padding:10px 14px;color:#991B1B;font-weight:700">Pick a delivery date to calculate</div>';return;}
+    var delivery=new Date(dateEl.value+'T00:00:00');
+    var days=parseInt(winEl.value,10);
+    var deadline=new Date(delivery.getTime()+days*86400000);
+    var today=new Date();today.setHours(0,0,0,0);
+    var daysLeft=Math.ceil((deadline-today)/86400000);
+    var color,emoji,status;
+    if(daysLeft<0){color='#991B1B';emoji='❌';status='Window closed '+(-daysLeft)+' day'+(daysLeft===-1?'':'s')+' ago. Happy Returns will not generate a QR code. Contact the retailer directly to request an exception.';}
+    else if(daysLeft===0){color='#B45309';emoji='⚠️';status='Today is your last day. Drop off before close of business or the window expires at midnight.';}
+    else if(daysLeft<=3){color='#B45309';emoji='⚠️';status=daysLeft+' day'+(daysLeft===1?'':'s')+' left. Drop off today or tomorrow to avoid a last-minute rush.';}
+    else if(daysLeft<=7){color='#065F46';emoji='⏰';status=daysLeft+' days left. Plan the drop-off this week.';}
+    else{color='#065F46';emoji='✅';status=daysLeft+' days left. Plenty of time.';}
+    out.innerHTML='<div style="background:#fff;border:2px solid var(--black);border-radius:10px;padding:12px 14px;box-shadow:2px 2px 0 var(--black)">'+
+      '<div style="font-size:15px;font-weight:800;color:var(--black);margin-bottom:4px">Deadline: <span style="background:var(--yellow);padding:2px 8px;border-radius:4px">'+fmtDate(deadline)+'</span></div>'+
+      '<div style="font-size:14px;color:'+color+';font-weight:700;margin-top:6px">'+emoji+' '+status+'</div>'+
+    '</div>';
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    var btn=document.getElementById('hr-deadline-go');
+    if(btn) btn.addEventListener('click',run);
+    var dateEl=document.getElementById('hr-deadline-date');
+    if(dateEl){
+      var t=new Date();dateEl.max=pad(t.getFullYear())+'-'+pad(t.getMonth()+1)+'-'+pad(t.getDate());
+    }
+  });
+})();
+
+(function(){
+'use strict';
+
+var DATA_URL = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@main/happy_returns.min.json';
+var ALL = [];
+var INDEX = {brands:[]};
+var ACTIVE_BRANDS = new Set();
+var FAVS = (function(){try{return new Set(JSON.parse(localStorage.getItem('hr_favs')||'[]'));}catch(e){return new Set();}})();
+var STATUS_FILTERS = new Set(['open']);
+var USER_LL = null, USER_MARKER = null, CURRENT_AREA = null;
+var RADIUS_MI = 25;
+var MAP = null, CLUSTER = null;
+var RENDER_TIMER = null, POPUP_OPEN = false;
+var RADIUS_CACHE = {items:null, ll:null, radius:null};
+
+var BRAND_META = {
+  'The UPS Store':      {slug:'ups-store', color:'#351C15', ring:'#D4A574', emoji:'🟤'},
+  'Ulta Beauty':        {slug:'ulta',      color:'#E31C79', ring:'#FFC5DE', emoji:'💗'},
+  'UPS Ship Center':    {slug:'ship-ctr',  color:'#ECE70F', ring:'#FFF9A8', emoji:'🟡'},
+  'Staples':            {slug:'staples',   color:'#CC0000', ring:'#FFCDD2', emoji:'🔴'},
+  'UPS Shipping Center':{slug:'ups-ship',  color:'#4A0E0E', ring:'#D4A574', emoji:'🟤'},
+  'Aim Mail Center 125':{slug:'aim',       color:'#1565C0', ring:'#BBDEFB', emoji:'🟦'}
+};
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function pad(n){return n<10?'0'+n:''+n;}
+function nowMins(){var d=new Date();return d.getHours()*60+d.getMinutes();}
+function parseHM(s){if(!s)return 0;var p=String(s).split(':');return (+p[0]||0)*60+(+p[1]||0);}
+function fmt12(mins){var h=Math.floor(mins/60)%24,m=mins%60,ap=h>=12?'PM':'AM',h12=((h+11)%12)+1;return h12+':'+pad(m)+' '+ap;}
+function fmtClock(){var d=new Date(),h=d.getHours(),m=d.getMinutes(),ap=h>=12?'PM':'AM',h12=((h+11)%12)+1;return h12+':'+pad(m)+' '+ap;}
+function hav(a,b,c,d){var R=3958.8,T=Math.PI/180,dLat=(c-a)*T,dLng=(d-b)*T;var A=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(a*T)*Math.cos(c*T)*Math.sin(dLng/2)*Math.sin(dLng/2);return 2*R*Math.asin(Math.sqrt(A));}
+function saveFavs(){try{localStorage.setItem('hr_favs',JSON.stringify([].concat(Array.from(FAVS))));}catch(e){}}
+
+var DAY_PREFIX = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+function parseHoursString(h){
+  if(!h) return {};
+  var out = {};
+  var parts = String(h).split(/[;,]/);
+  for(var i=0;i<parts.length;i++){
+    var p = parts[i].trim();
+    if(!p) continue;
+    var m = p.match(/^(Mo|Tu|We|Th|Fr|Sa|Su)\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/i);
+    if(m){
+      var day = m[1].charAt(0).toUpperCase()+m[1].charAt(1).toLowerCase();
+      out[day] = {start: parseHM(m[2]), end: parseHM(m[3]), raw: m[2]+'-'+m[3]};
+    } else if(/24\/7|24 hours/i.test(p)){
+      for(var j=0;j<DAY_PREFIX.length;j++) out[DAY_PREFIX[j]] = {start:0, end:1440, raw:'24 hours'};
+    }
+  }
+  return out;
+}
+function todayPrefix(){ return DAY_PREFIX[new Date().getDay()]; }
+function isOpenNow(h){
+  var parsed = parseHoursString(h);
+  var today = parsed[todayPrefix()];
+  if(!today) return false;
+  var n = nowMins();
+  return n >= today.start && n < today.end;
+}
+function todayHoursLabel(h){
+  var parsed = parseHoursString(h);
+  var today = parsed[todayPrefix()];
+  if(!today) return 'Closed today';
+  if(today.end-today.start >= 1439) return 'Open 24 hours';
+  var n = nowMins();
+  if(n < today.start) return 'Opens ' + fmt12(today.start);
+  if(n >= today.end) return 'Closed. Opens tomorrow';
+  return 'Open now. Closes ' + fmt12(today.end);
+}
+function humanAllHours(h){
+  var parsed = parseHoursString(h);
+  var dayNames = {Su:'Sun',Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat'};
+  var out = [];
+  var order = ['Mo','Tu','We','Th','Fr','Sa','Su'];
+  for(var i=0;i<order.length;i++){
+    var d = order[i], e = parsed[d];
+    if(e) out.push(dayNames[d]+': '+fmt12(e.start)+' - '+fmt12(e.end));
+    else out.push(dayNames[d]+': Closed');
+  }
+  return out.join('<br>');
+}
+
+var CITY_SNAPS = {
+  'new york':[40.7128,-74.006],'los angeles':[34.0522,-118.2437],'chicago':[41.8781,-87.6298],
+  'houston':[29.7604,-95.3698],'phoenix':[33.4484,-112.074],'philadelphia':[39.9526,-75.1652],
+  'san antonio':[29.4241,-98.4936],'san diego':[32.7157,-117.1611],'dallas':[32.7767,-96.797],
+  'austin':[30.2672,-97.7431],'san jose':[37.3382,-121.8863],'jacksonville':[30.3322,-81.6557],
+  'fort worth':[32.7555,-97.3308],'columbus':[39.9612,-82.9988],'charlotte':[35.2271,-80.8431],
+  'san francisco':[37.7749,-122.4194],'indianapolis':[39.7684,-86.1581],'seattle':[47.6062,-122.3321],
+  'denver':[39.7392,-104.9903],'washington':[38.9072,-77.0369],'boston':[42.3601,-71.0589],
+  'nashville':[36.1627,-86.7816],'baltimore':[39.2904,-76.6122],'portland':[45.5152,-122.6784],
+  'las vegas':[36.1699,-115.1398],'miami':[25.7617,-80.1918],'atlanta':[33.749,-84.388],
+  'minneapolis':[44.9778,-93.265],'orlando':[28.5383,-81.3792],'tampa':[27.9506,-82.4572],
+  'detroit':[42.3314,-83.0458],'st louis':[38.627,-90.1994],'kansas city':[39.0997,-94.5786],
+  'pittsburgh':[40.4406,-79.9959],'cincinnati':[39.1031,-84.512]
+};
+function normalizeCityQuery(q){return String(q||'').toLowerCase().trim().replace(/,.*/,'').replace(/\s+/g,' ');}
+function geocode(q){
+  var key = normalizeCityQuery(q);
+  if(CITY_SNAPS[key]) return Promise.resolve(CITY_SNAPS[key].slice());
+  var url = 'https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=8&countrycodes=us&q='+encodeURIComponent(q);
+  return fetch(url,{headers:{'Accept-Language':'en'}}).then(function(r){return r.json();}).then(function(a){
+    if(!a||!a.length) throw new Error('No results');
+    var CT = {city:6,town:5,village:3,municipality:5,administrative:4,county:2,borough:3,suburb:2,neighbourhood:1,hamlet:1};
+    var scored = a.map(function(x){var t=x.type||'',cls=x.class||'',base=CT[t]||0;if(cls==='place'||cls==='boundary')base+=1;if(cls==='tourism'||cls==='amenity'||cls==='building'||cls==='shop')base-=3;var imp=+x.importance||0;return{r:x,s:base*10+imp*5};});
+    scored.sort(function(a,b){return b.s-a.s;});
+    return [+scored[0].r.lat,+scored[0].r.lon];
+  });
+}
+
+function boot(){
+  var nudge = document.getElementById('hr-nudge');
+  if(nudge) nudge.innerHTML = '<span class="hr-loader"></span>Loading 10,017 verified Return Bars...';
+  fetch(DATA_URL,{cache:'force-cache'}).then(function(r){return r.json();}).then(function(data){
+    ALL = data;
+    buildBrandIndex();
+    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    renderBrandChips();
+    renderBrandGrid();
+    updateBrandStatus();
+    initMap();
+    startClock();
+    wireControls();
+    renderMap();
+    renderCityGrid();
+    autoLocate();
+    if(nudge) nudge.innerHTML = '📍 Tap <b>My Location</b> or search a city to see every Happy Returns bar within 25 miles. All host brands auto-loaded. Showing all 10,017 US bars at national zoom.';
+    try{
+      window.MAP=MAP;window.CLUSTER=CLUSTER;window.ALL=ALL;
+      window.__openFirstMarker=function(cb){
+        var f0=null;
+        if(window.CLUSTER){window.CLUSTER.eachLayer(function(l){if(!f0 && l instanceof L.Marker) f0=l;});}
+        if(!f0) return false;
+        var ll = f0.getLatLng();
+        window.CLUSTER.zoomToShowLayer(f0,function(){
+          // zoomToShowLayer triggers moveend which re-renders. Re-find marker at same lat/lng.
+          setTimeout(function(){
+            var fresh=null;
+            if(window.CLUSTER){
+              window.CLUSTER.eachLayer(function(l){
+                if(fresh || !(l instanceof L.Marker)) return;
+                var p = l.getLatLng();
+                if(Math.abs(p.lat-ll.lat)<1e-5 && Math.abs(p.lng-ll.lng)<1e-5) fresh=l;
+              });
+            }
+            if(!fresh && window.CLUSTER){
+              // Fallback: any marker still attached to the map
+              window.CLUSTER.eachLayer(function(l){if(!fresh && l instanceof L.Marker) fresh=l;});
+            }
+            if(fresh){
+              try{fresh.fire('click');}catch(e){}
+              setTimeout(function(){
+                if(fresh.getPopup && fresh.getPopup() && fresh.isPopupOpen && !fresh.isPopupOpen()){
+                  try{fresh.openPopup();}catch(e){}
+                }
+                if(cb) cb();
+              },200);
+            } else if(cb){cb();}
+          },100);
+        });
+        return true;
+      };
+      window.__HR_READY=true;
+    }catch(e){}
+  }).catch(function(e){
+    console.error('HR boot failed',e);
+    if(nudge) nudge.innerHTML = '⚠️ Could not reach the Return Bar data file. Check your connection and refresh.';
+  });
+}
+
+function buildBrandIndex(){
+  var counts = {};
+  for(var i=0;i<ALL.length;i++){
+    var b = ALL[i].b || 'Unknown';
+    counts[b] = (counts[b]||0)+1;
+  }
+  INDEX.brands = [];
+  INDEX.total = ALL.length;
+  Object.keys(counts).sort(function(a,b){return counts[b]-counts[a];}).forEach(function(name){
+    var meta = BRAND_META[name] || {slug:name.toLowerCase().replace(/\s+/g,'-'),color:'#262626',ring:'#ECE70F',emoji:'🏪'};
+    INDEX.brands.push({name:name, slug:meta.slug, count:counts[name], color:meta.color, ring:meta.ring, emoji:meta.emoji});
+  });
+}
+
+function renderBrandChips(){
+  var wrap = document.getElementById('hr-brands');
+  var top = INDEX.brands.slice(0,4);
+  wrap.innerHTML = top.map(function(x){
+    return '<span class="hr-bchip on" data-brand="'+esc(x.slug)+'"><span>'+x.emoji+' '+esc(x.name)+'</span><span class="hr-cn">'+x.count.toLocaleString()+'</span></span>';
+  }).join('');
+  wrap.querySelectorAll('[data-brand]').forEach(function(el){
+    el.addEventListener('click',function(){toggleBrandChip(el.dataset.brand);});
+  });
+}
+
+function toggleBrandChip(slug){
+  var chip = document.querySelector('[data-brand="'+slug+'"].hr-bchip');
+  if(ACTIVE_BRANDS.has(slug)){
+    ACTIVE_BRANDS.delete(slug);
+    if(chip) chip.classList.remove('on');
+  }else{
+    ACTIVE_BRANDS.add(slug);
+    if(chip) chip.classList.add('on');
+  }
+  invalidateRadiusCache();
+  scheduleRender();
+  updateBrandStatus();
+}
+
+function updateBrandStatus(){
+  var n = ACTIVE_BRANDS.size;
+  var el = document.getElementById('hr-brands-status');
+  if(el) el.textContent = n ? '- '+n+' brand'+(n===1?'':'s')+' showing' : '- no brands selected';
+  var cnt = document.getElementById('hr-cnt-brands');
+  if(cnt) cnt.textContent = n;
+}
+
+function renderBrandGrid(){
+  var g = document.getElementById('hr-brand-grid');
+  if(!g) return;
+  var top = INDEX.brands.slice(0,4);
+  g.innerHTML = top.map(function(x){
+    var hoursLine = 'Open typical retail hours';
+    if(x.name==='The UPS Store') hoursLine = '8:30 AM to 6:30 PM weekdays';
+    else if(x.name==='Ulta Beauty') hoursLine = '10 AM to 9 PM daily';
+    else if(x.name==='UPS Ship Center') hoursLine = '9 AM to 6 PM typical';
+    else if(x.name==='Staples') hoursLine = '8 AM to 9 PM weekdays';
+    return '<div class="hr-brand-card" data-brand="'+esc(x.slug)+'">'+
+      '<button class="hr-expand-btn" data-expand="'+esc(x.slug)+'">Expand ▶</button>'+
+      '<h4>'+x.emoji+' '+esc(x.name)+'</h4>'+
+      '<div class="hr-b-cnt">📍 '+x.count.toLocaleString()+' verified US bars</div>'+
+      '<div class="hr-b-hours">🕐 '+esc(hoursLine)+'</div>'+
+      '<div class="hr-b-tag">Tap card: show only '+esc(x.name)+' on map</div>'+
+    '</div>';
+  }).join('');
+  g.querySelectorAll('.hr-brand-card').forEach(function(el){
+    el.addEventListener('click',function(e){
+      if(e.target.dataset.expand){e.stopPropagation();openBrandModal(e.target.dataset.expand);return;}
+      var slug = el.dataset.brand;
+      INDEX.brands.forEach(function(b){
+        if(b.slug===slug){ACTIVE_BRANDS.add(slug);}
+        else{ACTIVE_BRANDS.delete(b.slug);}
+      });
+      document.querySelectorAll('.hr-bchip').forEach(function(c){
+        c.classList.toggle('on', c.dataset.brand===slug);
+      });
+      invalidateRadiusCache();
+      scheduleRender();
+      updateBrandStatus();
+      document.getElementById('hr-map').scrollIntoView({behavior:'smooth',block:'center'});
+    });
+  });
+}
+
+function initMap(){
+  MAP = L.map('hr-map',{scrollWheelZoom:true,zoomControl:true,preferCanvas:true,tap:true,touchZoom:true}).setView([39.8283,-98.5795],4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(MAP);
+  CLUSTER = L.markerClusterGroup({
+    showCoverageOnHover:false,
+    maxClusterRadius:70,
+    chunkedLoading:true,
+    chunkInterval:200,
+    chunkDelay:10,
+    removeOutsideVisibleBounds:true
+  });
+  MAP.addLayer(CLUSTER);
+  MAP.on('moveend',function(){updateCounters();});
+  MAP.on('popupopen',function(){POPUP_OPEN=true;});
+  MAP.on('popupclose',function(){POPUP_OPEN=false;scheduleRender();});
+}
+
+function autoLocate(){
+  if(!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(function(pos){
+    setUserLL([pos.coords.latitude,pos.coords.longitude]);
+  },function(){},{maximumAge:600000,timeout:5000});
+}
+
+function makeIcon(color,ring){
+  return L.divIcon({
+    className:'hr-pin',
+    html:'<div style="width:20px;height:20px;border-radius:50%;background:'+color+';border:3px solid '+ring+';box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>',
+    iconSize:[20,20], iconAnchor:[10,10]
+  });
+}
+
+function brandMetaByName(name){
+  for(var i=0;i<INDEX.brands.length;i++) if(INDEX.brands[i].name===name) return INDEX.brands[i];
+  return {color:'#262626',ring:'#ECE70F',slug:'other',emoji:'🏪'};
+}
+
+function matchesFilter(x){
+  var meta = brandMetaByName(x.b);
+  if(!ACTIVE_BRANDS.has(meta.slug)) return false;
+  if(USER_LL && RADIUS_MI < 100){
+    if(hav(USER_LL[0],USER_LL[1],x.lat,x.lng) > RADIUS_MI) return false;
+  }
+  var favKey = x.id || (x.b+'|'+x.lat+'|'+x.lng);
+  var it = STATUS_FILTERS.values(), next = it.next();
+  while(!next.done){
+    var f = next.value; next = it.next();
+    if(f==='favs' && !FAVS.has(favKey)) return false;
+    if(f==='open' && !isOpenNow(x.h)) return false;
+    if(f==='sun'){
+      var p = parseHoursString(x.h);
+      if(!p.Su) return false;
+    }
+    if(f==='late'){
+      var p2 = parseHoursString(x.h);
+      var t = p2[todayPrefix()];
+      if(!t || t.end < 19*60) return false;
+    }
+    if(f==='early'){
+      var p3 = parseHoursString(x.h);
+      var t2 = p3[todayPrefix()];
+      if(!t2 || t2.start > 9*60) return false;
+    }
+  }
+  return true;
+}
+
+function popupHtml(x){
+  var meta = brandMetaByName(x.b);
+  var open = isOpenNow(x.h);
+  var badgeCls = open ? 'open' : 'closed';
+  var statusTxt = todayHoursLabel(x.h);
+  var addrParts = [x.a, x.c, x.s, x.z].filter(Boolean);
+  var addr = addrParts.length ? addrParts.join(', ') : '';
+  var q = x.lat+','+x.lng;
+  var favKey = x.id || (x.b+'|'+x.lat+'|'+x.lng);
+  var fav = FAVS.has(favKey);
+  var subBrand = x.sb ? ' <span style="color:var(--soft);font-weight:500">('+esc(x.sb)+')</span>' : '';
+  return '<div class="hr-pop">'+
+    '<div class="hr-pop-head">'+
+      '<h4>'+meta.emoji+' '+esc(x.b)+subBrand+'</h4>'+
+      '<div class="hr-pop-actions">'+
+        '<button class="hr-pop-fav '+(fav?'on':'')+'" data-fav="'+esc(favKey)+'" title="Save to favorites" type="button">'+(fav?'♥':'♡')+'</button>'+
+        '<button class="hr-pop-close" data-close-popup="1" title="Close" type="button" aria-label="Close">×</button>'+
+      '</div>'+
+    '</div>'+
+    '<span class="hr-pop-badge '+badgeCls+'">'+esc(statusTxt)+'</span>'+
+    (addr?'<div class="hr-pop-line"><b>📍</b> '+esc(addr)+'</div>':'')+
+    (x.p?'<div class="hr-pop-line"><b>📞</b> <a href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">'+esc(x.p)+'</a></div>':'')+
+    '<div class="hr-pop-line"><b>🕐</b> This week:<br><span style="color:var(--mute);font-size:11.5px;display:block;margin-top:4px">'+humanAllHours(x.h)+'</span></div>'+
+    (x.d?'<div class="hr-pop-line"><b>💡</b> '+esc(x.d)+'</div>':'')+
+    '<div class="hr-pop-btns">'+
+      '<a class="hr-pop-btn" href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">🧭 Google</a>'+
+      '<a class="hr-pop-btn am" href="https://maps.apple.com/?daddr='+q+'" target="_blank" rel="noopener">🍎 Apple</a>'+
+      '<a class="hr-pop-btn wz" href="https://waze.com/ul?ll='+q+'&navigate=yes" target="_blank" rel="noopener">🚗 Waze</a>'+
+      (x.p?'<a class="hr-pop-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>':'<span></span>')+
+    '</div>'+
+  '</div>';
+}
+
+function scheduleRender(){
+  if(RENDER_TIMER) clearTimeout(RENDER_TIMER);
+  RENDER_TIMER = setTimeout(function(){
+    if(POPUP_OPEN){RENDER_TIMER=null;return;}
+    renderMap();
+  },25);
+}
+
+function buildRadiusCache(){
+  if(!USER_LL){RADIUS_CACHE={items:null,ll:null,radius:null};return;}
+  RADIUS_CACHE.ll = USER_LL; RADIUS_CACHE.radius = RADIUS_MI;
+  var u0=USER_LL[0],u1=USER_LL[1],r=RADIUS_MI;
+  RADIUS_CACHE.items = ALL.filter(function(x){return hav(u0,u1,x.lat,x.lng)<=r;});
+}
+function invalidateRadiusCache(){RADIUS_CACHE.ll=null;}
+function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI;}
+
+function renderMap(){
+  if(!CLUSTER) return;
+  CLUSTER.clearLayers();
+  var markers = [];
+  var workingSet;
+  if(USER_LL){
+    if(!radiusCacheValid()) buildRadiusCache();
+    workingSet = RADIUS_CACHE.items || [];
+  }else{
+    workingSet = ALL;
+  }
+  for(var i=0;i<workingSet.length;i++){
+    var x = workingSet[i];
+    if(!matchesFilter(x)) continue;
+    var meta = brandMetaByName(x.b);
+    var open = isOpenNow(x.h);
+    var ring = open ? '#DCFCE7' : (meta.ring||'#FEE2E2');
+    var mk = L.marker([x.lat,x.lng],{icon:makeIcon(meta.color, ring)});
+    (function(item,m){
+      m.on('click',function(){
+        MAP.closePopup();
+        if(!m.getPopup()){
+          var mapW = MAP.getSize().x;
+          var mw = Math.min(mapW-80, window.innerWidth<600?280:340);
+          m.bindPopup(popupHtml(item),{maxWidth:mw,minWidth:220,autoPan:true,autoPanPadding:[40,60],keepInView:true,closeButton:false,autoClose:false,closeOnClick:false});
+        }
+        m.openPopup();
+      });
+    })(x,mk);
+    markers.push(mk);
+  }
+  CLUSTER.addLayers(markers,{chunkedLoading:true});
+  updateCounters();
+  renderResultsList();
+}
+
+function updateCounters(){
+  var shown=0, open=0;
+  var workingSet;
+  if(USER_LL){
+    if(!radiusCacheValid()) buildRadiusCache();
+    workingSet = RADIUS_CACHE.items || [];
+  }else{
+    workingSet = ALL;
+  }
+  for(var i=0;i<workingSet.length;i++){
+    var x = workingSet[i];
+    if(!matchesFilter(x)) continue;
+    shown++;
+    if(isOpenNow(x.h)) open++;
+  }
+  document.getElementById('hr-cnt-shown').textContent = shown.toLocaleString();
+  document.getElementById('hr-cnt-open').textContent = open.toLocaleString();
+}
+
+function renderResultsList(){
+  var wrap = document.getElementById('hr-results');
+  var list = document.getElementById('hr-results-list');
+  if(!wrap || !list || !MAP) return;
+  if(!USER_LL){wrap.style.display='none'; return;}
+  wrap.style.display='';
+  var items = [];
+  if(!radiusCacheValid()) buildRadiusCache();
+  var ws = RADIUS_CACHE.items || [];
+  for(var i=0;i<ws.length;i++){
+    var x = ws[i];
+    if(!matchesFilter(x)) continue;
+    items.push({x:x, dist: hav(USER_LL[0],USER_LL[1],x.lat,x.lng)});
+  }
+  var sortMode = document.getElementById('hr-sort').value;
+  if(sortMode==='name') items.sort(function(a,b){return (a.x.b||'').localeCompare(b.x.b||'');});
+  else items.sort(function(a,b){return a.dist-b.dist;});
+  var capped = items.slice(0,100);
+  document.getElementById('hr-results-count').textContent = items.length.toLocaleString() + (items.length>100?' (showing nearest 100)':'');
+  document.getElementById('hr-results-area').textContent = 'within '+RADIUS_MI+' mi of '+(CURRENT_AREA||'your location');
+  if(!capped.length){
+    list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>';
+    return;
+  }
+  list.innerHTML = capped.map(renderResultCard).join('');
+}
+
+function renderResultCard(it){
+  var x = it.x;
+  var meta = brandMetaByName(x.b);
+  var open = isOpenNow(x.h);
+  var badge = open ? 'OPEN' : 'CLOSED';
+  var badgeCls = open ? 'open' : 'closed';
+  var addr = [x.a, x.c].filter(Boolean).join(', ') || x.c || '';
+  var dist = it.dist.toFixed(1)+' mi away';
+  var hrsLabel = todayHoursLabel(x.h);
+  var gm = 'https://www.google.com/maps/search/?api=1&query='+x.lat+','+x.lng;
+  var am = 'https://maps.apple.com/?daddr='+x.lat+','+x.lng;
+  var wz = 'https://waze.com/ul?ll='+x.lat+','+x.lng+'&navigate=yes';
+  var callBtn = x.p ? '<a class="hr-result-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>' : '<a class="hr-result-btn wz" href="'+wz+'" target="_blank" rel="noopener">🚗 Waze</a>';
+  return '<div class="hr-result-item">'+
+    '<div class="hr-result-head"><div class="hr-result-name">'+meta.emoji+' '+esc(x.b)+(x.sb?' <span style="color:var(--soft);font-weight:500;font-size:12px">('+esc(x.sb)+')</span>':'')+'</div><span class="hr-result-badge '+badgeCls+'">'+badge+'</span></div>'+
+    '<div class="hr-result-addr">📍 '+esc(addr)+'</div>'+
+    '<div class="hr-result-meta"><b>'+esc(dist)+'</b> · '+esc(hrsLabel)+(x.p?' · '+esc(x.p):'')+'</div>'+
+    '<div class="hr-result-btns">'+
+      '<a class="hr-result-btn" href="'+gm+'" target="_blank" rel="noopener">🗺 Maps</a>'+
+      '<a class="hr-result-btn am" href="'+am+'" target="_blank" rel="noopener">🍎 Apple</a>'+
+      callBtn+
+    '</div>'+
+  '</div>';
+}
+
+function renderCityGrid(){
+  var g = document.getElementById('hr-city-grid');
+  if(!g) return;
+  var byCity = {};
+  for(var i=0;i<ALL.length;i++){
+    var x = ALL[i];
+    if(!x.c || !x.s) continue;
+    var k = x.c+', '+x.s;
+    if(!byCity[k]) byCity[k] = {count:0, lat:x.lat, lng:x.lng};
+    byCity[k].count++;
+  }
+  var cities = Object.keys(byCity).sort(function(a,b){return byCity[b].count - byCity[a].count;}).slice(0,24);
+  var emojis = {NY:'🗽',CA:'🌴',TX:'🤠',IL:'🌆',FL:'🏖️',GA:'🍑',NV:'🎰',AZ:'🌵',WA:'☕',CO:'⛰️',MA:'🎓',PA:'🔔',OH:'🏙️',MD:'⚓',OR:'🌲',MN:'🌾',TN:'🎸',MO:'🏙️',NC:'🏔️',MI:'🚗'};
+  g.innerHTML = cities.map(function(name){
+    var d = byCity[name];
+    var st = (name.split(', ')[1]||'').trim();
+    var em = emojis[st]||'🏪';
+    return '<div class="hr-city" data-lat="'+d.lat+'" data-lng="'+d.lng+'" data-name="'+esc(name)+'">'+
+      '<h4>'+em+' '+esc(name)+'</h4>'+
+      '<div class="hr-cnt-sm">'+d.count.toLocaleString()+' Return Bars</div>'+
+      '<div class="hr-pick">Tap to zoom map here</div>'+
+    '</div>';
+  }).join('');
+  g.querySelectorAll('.hr-city').forEach(function(el){
+    el.addEventListener('click',function(){
+      var lat = +el.dataset.lat, lng = +el.dataset.lng, name = el.dataset.name;
+      if(MAP && !isNaN(lat) && !isNaN(lng)){
+        CURRENT_AREA = name;
+        setUserLL([lat,lng]);
+        document.getElementById('hr-map').scrollIntoView({behavior:'smooth',block:'center'});
+      }
+    });
+  });
+}
+
+function setUserLL(ll){
+  USER_LL = ll;
+  invalidateRadiusCache();
+  if(USER_MARKER) MAP.removeLayer(USER_MARKER);
+  USER_MARKER = L.circleMarker(ll,{radius:9,color:'#262626',fillColor:'#ECE70F',fillOpacity:1,weight:3}).addTo(MAP).bindPopup('📍 Your location');
+  var z = RADIUS_MI<=5?13 : RADIUS_MI<=15?12 : RADIUS_MI<=30?11 : RADIUS_MI<=50?10 : RADIUS_MI<=100?9 : 8;
+  MAP.setView(ll,z);
+  setTimeout(function(){if(MAP) MAP.invalidateSize();},200);
+  var nudge = document.getElementById('hr-nudge');
+  if(nudge) nudge.style.display='none';
+  scheduleRender();
+}
+
+function openBrandModal(slug){
+  var brand = null;
+  for(var i=0;i<INDEX.brands.length;i++) if(INDEX.brands[i].slug===slug){brand=INDEX.brands[i];break;}
+  if(!brand) return;
+  var modal = document.getElementById('hr-brand-modal');
+  document.getElementById('hr-brand-modal-title').innerHTML = brand.emoji+' '+esc(brand.name)+' <span style="color:var(--black);background:var(--yellow);padding:2px 8px;border-radius:4px">· '+brand.count.toLocaleString()+' US bars</span>';
+  document.getElementById('hr-brand-modal-meta').textContent = 'Scrollable list of every '+brand.name+' Return Bar. Filter by city, state or ZIP.';
+  var list = document.getElementById('hr-brand-modal-list');
+  var rows = ALL.filter(function(x){return x.b===brand.name;});
+  function render(filter){
+    var fil = (filter||'').toLowerCase().trim();
+    var f = fil ? rows.filter(function(x){return ((x.a||'')+' '+(x.c||'')+' '+(x.s||'')+' '+(x.z||'')).toLowerCase().indexOf(fil)>=0;}) : rows;
+    var top = f.slice(0,300);
+    list.innerHTML = top.map(function(x){
+      var q = x.lat+','+x.lng;
+      return '<div class="hr-loc-item">'+
+        '<div style="flex:1;min-width:0">'+
+          '<b>'+esc(x.c||'')+', '+esc(x.s||'')+' '+esc(x.z||'')+'</b>'+
+          '<div style="color:var(--mute);font-size:12px;margin-top:2px">'+esc(x.a||'')+'</div>'+
+          (x.p?'<div style="color:var(--black);font-size:12px;margin-top:2px">📞 '+esc(x.p)+'</div>':'')+
+        '</div>'+
+        '<div class="hr-loc-btns">'+
+          '<a href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">🧭 Directions</a>'+
+          (x.p?'<a class="call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>':'')+
+        '</div>'+
+      '</div>';
+    }).join('') + (f.length>300?'<div style="text-align:center;color:var(--soft);padding:10px;font-size:12px">...and '+(f.length-300).toLocaleString()+' more. Use the filter box above to narrow.</div>' : (f.length===0?'<div style="text-align:center;color:var(--soft);padding:14px">No locations match.</div>':''));
+  }
+  render('');
+  document.getElementById('hr-brand-modal-filter').oninput = function(e){render(e.target.value);};
+  modal.classList.add('on');
+}
+
+function runTrip(){
+  var out = document.getElementById('hr-trip-results');
+  var s = document.getElementById('hr-trip-start').value.trim();
+  var e = document.getElementById('hr-trip-end').value.trim();
+  var d = +document.getElementById('hr-trip-detour').value;
+  if(!s || !e){out.innerHTML='<div style="color:var(--red);font-weight:700">Enter both start and end cities.</div>'; return;}
+  out.innerHTML = '<div><span class="hr-loader"></span>Geocoding...</div>';
+  Promise.all([geocode(s), geocode(e)]).then(function(pts){
+    var A = pts[0], B = pts[1];
+    function detour(x){
+      var d12 = hav(A[0],A[1],B[0],B[1]); if(d12<1) return 9999;
+      var t = ((x.lat-A[0])*(B[0]-A[0]) + (x.lng-A[1])*(B[1]-A[1])) / (Math.pow(B[0]-A[0],2)+Math.pow(B[1]-A[1],2));
+      if(t<0||t>1) return 9999;
+      var pLat = A[0]+t*(B[0]-A[0]), pLng = A[1]+t*(B[1]-A[1]);
+      return hav(x.lat,x.lng, pLat,pLng);
+    }
+    var hits = ALL.map(function(x){return {x:x, d:detour(x)};}).filter(function(c){return c.d<=d;}).sort(function(a,b){return a.d-b.d;}).slice(0,15);
+    if(!hits.length){out.innerHTML='<div style="color:var(--mute)">No Return Bars within '+d+' miles of that route. Widen tolerance and try again.</div>';return;}
+    out.innerHTML = hits.map(function(c){
+      var meta = brandMetaByName(c.x.b);
+      var q = c.x.lat+','+c.x.lng;
+      return '<div class="hr-trip-item">'+
+        '<span><b>'+meta.emoji+' '+esc(c.x.b)+'</b><br><span style="color:var(--mute);font-size:12px">'+esc(c.x.c||'')+', '+esc(c.x.s||'')+' · '+c.d.toFixed(1)+' mi detour</span></span>'+
+        '<a class="hr-pop-btn" style="padding:5px 10px" href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">Go</a>'+
+      '</div>';
+    }).join('');
+  }).catch(function(err){out.innerHTML='<div style="color:var(--red);font-weight:700">Geocode failed: '+esc(err.message)+'</div>';});
+}
+
+function startClock(){
+  var el = document.getElementById('hr-clock');
+  function tick(){if(el) el.textContent = fmtClock();}
+  tick(); setInterval(tick,30000);
+  setInterval(function(){scheduleRender();}, 60000);
+}
+
+function wireControls(){
+  document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(el){
+    el.addEventListener('click',function(){
+      var f = el.dataset.f;
+      if(STATUS_FILTERS.has(f)){STATUS_FILTERS.delete(f); el.classList.remove('on');}
+      else{STATUS_FILTERS.add(f); el.classList.add('on');}
+      scheduleRender();
+    });
+  });
+  document.getElementById('hr-sort').addEventListener('change',function(){scheduleRender();});
+  document.getElementById('hr-radius').addEventListener('input',function(e){
+    RADIUS_MI = +e.target.value;
+    document.getElementById('hr-radius-lbl').textContent = RADIUS_MI+' mi';
+    invalidateRadiusCache();
+    scheduleRender();
+  });
+  document.getElementById('hr-btn-clear').addEventListener('click',function(){
+    STATUS_FILTERS = new Set(['open']);
+    RADIUS_MI = 25;
+    document.getElementById('hr-radius').value = 25;
+    document.getElementById('hr-radius-lbl').textContent = '25 mi';
+    document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(x){x.classList.toggle('on', x.dataset.f==='open');});
+    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
+    if(USER_MARKER){MAP.removeLayer(USER_MARKER); USER_MARKER=null;}
+    USER_LL = null; CURRENT_AREA = null;
+    document.getElementById('hr-loc-input').value='';
+    if(MAP) MAP.setView([39.8283,-98.5795],4);
+    document.getElementById('hr-nudge').style.display='';
+    document.getElementById('hr-results').style.display='none';
+    invalidateRadiusCache();
+    updateBrandStatus();
+    scheduleRender();
+  });
+  document.getElementById('hr-btn-geo').addEventListener('click',function(){
+    if(!navigator.geolocation){alert('Geolocation not supported');return;}
+    navigator.geolocation.getCurrentPosition(function(pos){
+      CURRENT_AREA = 'your location';
+      setUserLL([pos.coords.latitude,pos.coords.longitude]);
+    },function(e){alert('Location denied: '+e.message);});
+  });
+  var _seq = 0;
+  document.getElementById('hr-btn-search').addEventListener('click',function(){
+    var q = document.getElementById('hr-loc-input').value.trim(); if(!q) return;
+    var mySeq = ++_seq;
+    geocode(q).then(function(ll){if(mySeq!==_seq) return; CURRENT_AREA = q; setUserLL(ll);})
+              .catch(function(e){if(mySeq!==_seq) return; alert('Search failed: '+e.message);});
+  });
+  document.getElementById('hr-loc-input').addEventListener('keydown',function(e){if(e.key==='Enter') document.getElementById('hr-btn-search').click();});
+  document.getElementById('hr-btn-fs').addEventListener('click',function(){
+    var el = document.getElementById('hr-map');
+    if(!document.fullscreenElement){if(el.requestFullscreen) el.requestFullscreen();}
+    else{document.exitFullscreen();}
+    setTimeout(function(){MAP && MAP.invalidateSize();},300);
+  });
+  document.getElementById('hr-btn-trip').addEventListener('click',function(){document.getElementById('hr-trip-modal').classList.add('on');});
+  document.getElementById('hr-trip-go').addEventListener('click',runTrip);
+  document.getElementById('hr-b-all').addEventListener('click',function(){
+    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
+    invalidateRadiusCache();
+    updateBrandStatus();
+    scheduleRender();
+  });
+  document.getElementById('hr-b-none').addEventListener('click',function(){
+    ACTIVE_BRANDS = new Set();
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
+    invalidateRadiusCache();
+    updateBrandStatus();
+    scheduleRender();
+  });
+  document.querySelectorAll('[data-close]').forEach(function(el){el.addEventListener('click',function(){el.closest('.hr-modal').classList.remove('on');});});
+  document.querySelectorAll('.hr-modal').forEach(function(m){m.addEventListener('click',function(e){if(e.target===m) m.classList.remove('on');});});
+  document.body.addEventListener('click',function(e){
+    var t = e.target;
+    if(t && t.dataset && t.dataset.fav){
+      var k = t.dataset.fav;
+      if(FAVS.has(k)){FAVS.delete(k); t.classList.remove('on'); t.textContent='♡';}
+      else{FAVS.add(k); t.classList.add('on'); t.textContent='♥';}
+      saveFavs();
+    }
+    if(t && t.dataset && t.dataset.closePopup && MAP) MAP.closePopup();
+  });
+}
+
+function waitLeaflet(){
+  if(typeof L==='undefined' || typeof L.markerClusterGroup==='undefined'){return setTimeout(waitLeaflet,100);}
+  boot();
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',waitLeaflet);
+else waitLeaflet();
+})();
+
