@@ -1,5 +1,6 @@
-/* happyreturnslocations.us — bundled client-side JS */
+/* happyreturnslocations.us — bundled client-side JS (v2 progressive-load) */
 
+/* ================= Deadline tracker widget (self-contained) ================= */
 (function(){
   function pad(n){return n<10?'0'+n:''+n;}
   function fmtDate(d){
@@ -18,11 +19,11 @@
     var today=new Date();today.setHours(0,0,0,0);
     var daysLeft=Math.ceil((deadline-today)/86400000);
     var color,emoji,status;
-    if(daysLeft<0){color='#991B1B';emoji='❌';status='Window closed '+(-daysLeft)+' day'+(daysLeft===-1?'':'s')+' ago. Happy Returns will not generate a QR code. Contact the retailer directly to request an exception.';}
-    else if(daysLeft===0){color='#B45309';emoji='⚠️';status='Today is your last day. Drop off before close of business or the window expires at midnight.';}
-    else if(daysLeft<=3){color='#B45309';emoji='⚠️';status=daysLeft+' day'+(daysLeft===1?'':'s')+' left. Drop off today or tomorrow to avoid a last-minute rush.';}
-    else if(daysLeft<=7){color='#065F46';emoji='⏰';status=daysLeft+' days left. Plan the drop-off this week.';}
-    else{color='#065F46';emoji='✅';status=daysLeft+' days left. Plenty of time.';}
+    if(daysLeft<0){color='#991B1B';emoji='X';status='Window closed '+(-daysLeft)+' day'+(daysLeft===-1?'':'s')+' ago. Happy Returns will not generate a QR code. Contact the retailer directly to request an exception.';}
+    else if(daysLeft===0){color='#B45309';emoji='!';status='Today is your last day. Drop off before close of business or the window expires at midnight.';}
+    else if(daysLeft<=3){color='#B45309';emoji='!';status=daysLeft+' day'+(daysLeft===1?'':'s')+' left. Drop off today or tomorrow to avoid a last-minute rush.';}
+    else if(daysLeft<=7){color='#065F46';emoji='*';status=daysLeft+' days left. Plan the drop-off this week.';}
+    else{color='#065F46';emoji='v';status=daysLeft+' days left. Plenty of time.';}
     out.innerHTML='<div style="background:#fff;border:2px solid var(--black);border-radius:10px;padding:12px 14px;box-shadow:2px 2px 0 var(--black)">'+
       '<div style="font-size:15px;font-weight:800;color:var(--black);margin-bottom:4px">Deadline: <span style="background:var(--yellow);padding:2px 8px;border-radius:4px">'+fmtDate(deadline)+'</span></div>'+
       '<div style="font-size:14px;color:'+color+';font-weight:700;margin-top:6px">'+emoji+' '+status+'</div>'+
@@ -38,13 +39,16 @@
   });
 })();
 
+/* ================= Main map app (progressive-load) ================= */
 (function(){
 'use strict';
 
-var DATA_URL = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@main/happy_returns.min.json';
-var ALL = [];
-var INDEX = {brands:[]};
-var ACTIVE_BRANDS = new Set();
+var DATA_BASE = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@main/';
+var FEATURED = [];                  // ~200 pins loaded first (national coverage)
+var BRAND_DATA = {};                // slug -> array of rows (lazy)
+var BRAND_LOADING = {};             // slug -> Promise (in-flight)
+var INDEX = {brands:[], total:0};
+var ACTIVE_BRANDS = new Set();      // slugs user wants visible (default: all 4)
 var FAVS = (function(){try{return new Set(JSON.parse(localStorage.getItem('hr_favs')||'[]'));}catch(e){return new Set();}})();
 var STATUS_FILTERS = new Set(['open']);
 var USER_LL = null, USER_MARKER = null, CURRENT_AREA = null;
@@ -52,15 +56,16 @@ var RADIUS_MI = 25;
 var MAP = null, CLUSTER = null;
 var RENDER_TIMER = null, POPUP_OPEN = false;
 var RADIUS_CACHE = {items:null, ll:null, radius:null};
+var BRAND_RENDER_ZOOM = 7;          // zoom level at which brand pins start rendering (national zoom = 4)
 
 var BRAND_META = {
   'The UPS Store':      {slug:'ups-store', color:'#351C15', ring:'#D4A574', emoji:'🟤'},
   'Ulta Beauty':        {slug:'ulta',      color:'#E31C79', ring:'#FFC5DE', emoji:'💗'},
   'UPS Ship Center':    {slug:'ship-ctr',  color:'#ECE70F', ring:'#FFF9A8', emoji:'🟡'},
-  'Staples':            {slug:'staples',   color:'#CC0000', ring:'#FFCDD2', emoji:'🔴'},
-  'UPS Shipping Center':{slug:'ups-ship',  color:'#4A0E0E', ring:'#D4A574', emoji:'🟤'},
-  'Aim Mail Center 125':{slug:'aim',       color:'#1565C0', ring:'#BBDEFB', emoji:'🟦'}
+  'Staples':            {slug:'staples',   color:'#CC0000', ring:'#FFCDD2', emoji:'🔴'}
 };
+var SLUG_TO_META = {};
+Object.keys(BRAND_META).forEach(function(name){ var m=BRAND_META[name]; SLUG_TO_META[m.slug]={name:name,color:m.color,ring:m.ring,emoji:m.emoji}; });
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function pad(n){return n<10?'0'+n:''+n;}
@@ -77,8 +82,7 @@ function parseHoursString(h){
   var out = {};
   var parts = String(h).split(/[;,]/);
   for(var i=0;i<parts.length;i++){
-    var p = parts[i].trim();
-    if(!p) continue;
+    var p = parts[i].trim(); if(!p) continue;
     var m = p.match(/^(Mo|Tu|We|Th|Fr|Sa|Su)\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/i);
     if(m){
       var day = m[1].charAt(0).toUpperCase()+m[1].charAt(1).toLowerCase();
@@ -90,35 +94,9 @@ function parseHoursString(h){
   return out;
 }
 function todayPrefix(){ return DAY_PREFIX[new Date().getDay()]; }
-function isOpenNow(h){
-  var parsed = parseHoursString(h);
-  var today = parsed[todayPrefix()];
-  if(!today) return false;
-  var n = nowMins();
-  return n >= today.start && n < today.end;
-}
-function todayHoursLabel(h){
-  var parsed = parseHoursString(h);
-  var today = parsed[todayPrefix()];
-  if(!today) return 'Closed today';
-  if(today.end-today.start >= 1439) return 'Open 24 hours';
-  var n = nowMins();
-  if(n < today.start) return 'Opens ' + fmt12(today.start);
-  if(n >= today.end) return 'Closed. Opens tomorrow';
-  return 'Open now. Closes ' + fmt12(today.end);
-}
-function humanAllHours(h){
-  var parsed = parseHoursString(h);
-  var dayNames = {Su:'Sun',Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat'};
-  var out = [];
-  var order = ['Mo','Tu','We','Th','Fr','Sa','Su'];
-  for(var i=0;i<order.length;i++){
-    var d = order[i], e = parsed[d];
-    if(e) out.push(dayNames[d]+': '+fmt12(e.start)+' - '+fmt12(e.end));
-    else out.push(dayNames[d]+': Closed');
-  }
-  return out.join('<br>');
-}
+function isOpenNow(h){var p=parseHoursString(h);var t=p[todayPrefix()];if(!t)return false;var n=nowMins();return n>=t.start && n<t.end;}
+function todayHoursLabel(h){var p=parseHoursString(h);var t=p[todayPrefix()];if(!t)return 'Closed today';if(t.end-t.start>=1439)return 'Open 24 hours';var n=nowMins();if(n<t.start)return 'Opens '+fmt12(t.start);if(n>=t.end)return 'Closed. Opens tomorrow';return 'Open now. Closes '+fmt12(t.end);}
+function humanAllHours(h){var p=parseHoursString(h);var dn={Su:'Sun',Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat'};var out=[];var order=['Mo','Tu','We','Th','Fr','Sa','Su'];for(var i=0;i<order.length;i++){var d=order[i],e=p[d];if(e)out.push(dn[d]+': '+fmt12(e.start)+' - '+fmt12(e.end));else out.push(dn[d]+': Closed');}return out.join('<br>');}
 
 var CITY_SNAPS = {
   'new york':[40.7128,-74.006],'los angeles':[34.0522,-118.2437],'chicago':[41.8781,-87.6298],
@@ -141,19 +119,51 @@ function geocode(q){
   var url = 'https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=8&countrycodes=us&q='+encodeURIComponent(q);
   return fetch(url,{headers:{'Accept-Language':'en'}}).then(function(r){return r.json();}).then(function(a){
     if(!a||!a.length) throw new Error('No results');
-    var CT = {city:6,town:5,village:3,municipality:5,administrative:4,county:2,borough:3,suburb:2,neighbourhood:1,hamlet:1};
-    var scored = a.map(function(x){var t=x.type||'',cls=x.class||'',base=CT[t]||0;if(cls==='place'||cls==='boundary')base+=1;if(cls==='tourism'||cls==='amenity'||cls==='building'||cls==='shop')base-=3;var imp=+x.importance||0;return{r:x,s:base*10+imp*5};});
+    var CT={city:6,town:5,village:3,municipality:5,administrative:4,county:2,borough:3,suburb:2,neighbourhood:1,hamlet:1};
+    var scored=a.map(function(x){var t=x.type||'',cls=x.class||'',base=CT[t]||0;if(cls==='place'||cls==='boundary')base+=1;if(cls==='tourism'||cls==='amenity'||cls==='building'||cls==='shop')base-=3;var imp=+x.importance||0;return{r:x,s:base*10+imp*5};});
     scored.sort(function(a,b){return b.s-a.s;});
     return [+scored[0].r.lat,+scored[0].r.lon];
   });
 }
 
+/* ---- Data loading ---- */
+function loadBrand(slug){
+  if(BRAND_DATA[slug]) return Promise.resolve(BRAND_DATA[slug]);
+  if(BRAND_LOADING[slug]) return BRAND_LOADING[slug];
+  BRAND_LOADING[slug] = fetch(DATA_BASE+slug+'.json').then(function(r){return r.json();}).then(function(j){
+    BRAND_DATA[slug] = j;
+    delete BRAND_LOADING[slug];
+    invalidateRadiusCache();
+    scheduleRender();
+    return j;
+  }).catch(function(e){delete BRAND_LOADING[slug]; console.warn('load fail',slug,e); return null;});
+  return BRAND_LOADING[slug];
+}
+function loadAllBrands(){ return Promise.all(INDEX.brands.map(function(b){return loadBrand(b.slug);})); }
+function allLoadedItems(){
+  // Union of all loaded brand data + featured (for trip planner, city grid, modal)
+  var out = FEATURED.slice();
+  var seen = {}; for(var i=0;i<out.length;i++){seen[out[i].id]=1;}
+  INDEX.brands.forEach(function(b){
+    var rows = BRAND_DATA[b.slug]; if(!rows) return;
+    for(var j=0;j<rows.length;j++){ if(!seen[rows[j].id]){seen[rows[j].id]=1; out.push(rows[j]);} }
+  });
+  return out;
+}
+
 function boot(){
   var nudge = document.getElementById('hr-nudge');
-  if(nudge) nudge.innerHTML = '<span class="hr-loader"></span>Loading 10,017 verified Return Bars...';
-  fetch(DATA_URL,{cache:'force-cache'}).then(function(r){return r.json();}).then(function(data){
-    ALL = data;
-    buildBrandIndex();
+  if(nudge) nudge.innerHTML = '<span class="hr-loader"></span>Loading map...';
+  Promise.all([
+    fetch(DATA_BASE+'hr-index.json',{cache:'force-cache'}).then(function(r){return r.json();}),
+    fetch(DATA_BASE+'hr-featured.json',{cache:'force-cache'}).then(function(r){return r.json();}).catch(function(){return [];})
+  ]).then(function(res){
+    INDEX = res[0]; FEATURED = res[1]||[];
+    // Enrich brands with meta (color/ring/emoji from BRAND_META)
+    INDEX.brands.forEach(function(b){
+      var meta = SLUG_TO_META[b.slug];
+      if(meta){ b.color = meta.color; b.ring = meta.ring; b.emoji = meta.emoji; }
+    });
     ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
     renderBrandChips();
     renderBrandGrid();
@@ -161,19 +171,22 @@ function boot(){
     initMap();
     startClock();
     wireControls();
-    renderMap();
-    renderCityGrid();
+    renderMap();     // first paint: featured only
     autoLocate();
-    if(nudge) nudge.innerHTML = '📍 Tap <b>My Location</b> or search a city to see every Happy Returns bar within 25 miles. All host brands auto-loaded. Showing all 10,017 US bars at national zoom.';
+    // Background: fetch all 4 brand files in parallel. Each triggers scheduleRender when done.
+    loadAllBrands().then(function(){ renderCityGrid(); });
+    if(nudge) nudge.innerHTML = 'Tap <b>My Location</b> or search a city or ZIP to see every Happy Returns bar within 25 miles. Showing a national sample at this zoom - zoom in or search to see all 10,017.';
+    // Window hooks for tests
     try{
-      window.MAP=MAP;window.CLUSTER=CLUSTER;window.ALL=ALL;
+      window.MAP=MAP; window.CLUSTER=CLUSTER; window.INDEX=INDEX;
+      Object.defineProperty(window,'ALL',{get:allLoadedItems, configurable:true});
+      window.FEATURED=FEATURED; window.BRAND_DATA=BRAND_DATA;
       window.__openFirstMarker=function(cb){
         var f0=null;
         if(window.CLUSTER){window.CLUSTER.eachLayer(function(l){if(!f0 && l instanceof L.Marker) f0=l;});}
         if(!f0) return false;
         var ll = f0.getLatLng();
         window.CLUSTER.zoomToShowLayer(f0,function(){
-          // zoomToShowLayer triggers moveend which re-renders. Re-find marker at same lat/lng.
           setTimeout(function(){
             var fresh=null;
             if(window.CLUSTER){
@@ -183,18 +196,9 @@ function boot(){
                 if(Math.abs(p.lat-ll.lat)<1e-5 && Math.abs(p.lng-ll.lng)<1e-5) fresh=l;
               });
             }
-            if(!fresh && window.CLUSTER){
-              // Fallback: any marker still attached to the map
-              window.CLUSTER.eachLayer(function(l){if(!fresh && l instanceof L.Marker) fresh=l;});
-            }
-            if(fresh){
-              try{fresh.fire('click');}catch(e){}
-              setTimeout(function(){
-                if(fresh.getPopup && fresh.getPopup() && fresh.isPopupOpen && !fresh.isPopupOpen()){
-                  try{fresh.openPopup();}catch(e){}
-                }
-                if(cb) cb();
-              },200);
+            if(!fresh && window.CLUSTER){window.CLUSTER.eachLayer(function(l){if(!fresh && l instanceof L.Marker) fresh=l;});}
+            if(fresh){ try{fresh.fire('click');}catch(e){}
+              setTimeout(function(){ if(fresh.getPopup && fresh.getPopup() && fresh.isPopupOpen && !fresh.isPopupOpen()){ try{fresh.openPopup();}catch(e){} } if(cb) cb();},200);
             } else if(cb){cb();}
           },100);
         });
@@ -204,28 +208,13 @@ function boot(){
     }catch(e){}
   }).catch(function(e){
     console.error('HR boot failed',e);
-    if(nudge) nudge.innerHTML = '⚠️ Could not reach the Return Bar data file. Check your connection and refresh.';
-  });
-}
-
-function buildBrandIndex(){
-  var counts = {};
-  for(var i=0;i<ALL.length;i++){
-    var b = ALL[i].b || 'Unknown';
-    counts[b] = (counts[b]||0)+1;
-  }
-  INDEX.brands = [];
-  INDEX.total = ALL.length;
-  Object.keys(counts).sort(function(a,b){return counts[b]-counts[a];}).forEach(function(name){
-    var meta = BRAND_META[name] || {slug:name.toLowerCase().replace(/\s+/g,'-'),color:'#262626',ring:'#ECE70F',emoji:'🏪'};
-    INDEX.brands.push({name:name, slug:meta.slug, count:counts[name], color:meta.color, ring:meta.ring, emoji:meta.emoji});
+    if(nudge) nudge.innerHTML = 'Could not reach the Return Bar data files. Check your connection and refresh.';
   });
 }
 
 function renderBrandChips(){
   var wrap = document.getElementById('hr-brands');
-  var top = INDEX.brands.slice(0,4);
-  wrap.innerHTML = top.map(function(x){
+  wrap.innerHTML = INDEX.brands.map(function(x){
     return '<span class="hr-bchip on" data-brand="'+esc(x.slug)+'"><span>'+x.emoji+' '+esc(x.name)+'</span><span class="hr-cn">'+x.count.toLocaleString()+'</span></span>';
   }).join('');
   wrap.querySelectorAll('[data-brand]').forEach(function(el){
@@ -241,6 +230,8 @@ function toggleBrandChip(slug){
   }else{
     ACTIVE_BRANDS.add(slug);
     if(chip) chip.classList.add('on');
+    // Lazy-load brand data if not yet loaded
+    if(!BRAND_DATA[slug]) loadBrand(slug);
   }
   invalidateRadiusCache();
   scheduleRender();
@@ -258,18 +249,17 @@ function updateBrandStatus(){
 function renderBrandGrid(){
   var g = document.getElementById('hr-brand-grid');
   if(!g) return;
-  var top = INDEX.brands.slice(0,4);
-  g.innerHTML = top.map(function(x){
+  g.innerHTML = INDEX.brands.map(function(x){
     var hoursLine = 'Open typical retail hours';
     if(x.name==='The UPS Store') hoursLine = '8:30 AM to 6:30 PM weekdays';
     else if(x.name==='Ulta Beauty') hoursLine = '10 AM to 9 PM daily';
     else if(x.name==='UPS Ship Center') hoursLine = '9 AM to 6 PM typical';
     else if(x.name==='Staples') hoursLine = '8 AM to 9 PM weekdays';
     return '<div class="hr-brand-card" data-brand="'+esc(x.slug)+'">'+
-      '<button class="hr-expand-btn" data-expand="'+esc(x.slug)+'">Expand ▶</button>'+
+      '<button class="hr-expand-btn" data-expand="'+esc(x.slug)+'">Expand &rsaquo;</button>'+
       '<h4>'+x.emoji+' '+esc(x.name)+'</h4>'+
-      '<div class="hr-b-cnt">📍 '+x.count.toLocaleString()+' verified US bars</div>'+
-      '<div class="hr-b-hours">🕐 '+esc(hoursLine)+'</div>'+
+      '<div class="hr-b-cnt">'+x.count.toLocaleString()+' verified US bars</div>'+
+      '<div class="hr-b-hours">'+esc(hoursLine)+'</div>'+
       '<div class="hr-b-tag">Tap card: show only '+esc(x.name)+' on map</div>'+
     '</div>';
   }).join('');
@@ -278,12 +268,10 @@ function renderBrandGrid(){
       if(e.target.dataset.expand){e.stopPropagation();openBrandModal(e.target.dataset.expand);return;}
       var slug = el.dataset.brand;
       INDEX.brands.forEach(function(b){
-        if(b.slug===slug){ACTIVE_BRANDS.add(slug);}
+        if(b.slug===slug){ACTIVE_BRANDS.add(slug); if(!BRAND_DATA[slug]) loadBrand(slug);}
         else{ACTIVE_BRANDS.delete(b.slug);}
       });
-      document.querySelectorAll('.hr-bchip').forEach(function(c){
-        c.classList.toggle('on', c.dataset.brand===slug);
-      });
+      document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.toggle('on', c.dataset.brand===slug);});
       invalidateRadiusCache();
       scheduleRender();
       updateBrandStatus();
@@ -295,43 +283,35 @@ function renderBrandGrid(){
 function initMap(){
   MAP = L.map('hr-map',{scrollWheelZoom:true,zoomControl:true,preferCanvas:true,tap:true,touchZoom:true}).setView([39.8283,-98.5795],4);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(MAP);
-  CLUSTER = L.markerClusterGroup({
-    showCoverageOnHover:false,
-    maxClusterRadius:70,
-    chunkedLoading:true,
-    chunkInterval:200,
-    chunkDelay:10,
-    removeOutsideVisibleBounds:true
-  });
+  CLUSTER = L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:70,chunkedLoading:true,chunkInterval:200,chunkDelay:10,removeOutsideVisibleBounds:true});
   MAP.addLayer(CLUSTER);
-  MAP.on('moveend',function(){updateCounters();});
+  MAP.on('moveend',function(){updateCounters(); scheduleRender();});
   MAP.on('popupopen',function(){POPUP_OPEN=true;});
-  MAP.on('popupclose',function(){POPUP_OPEN=false;scheduleRender();});
+  MAP.on('popupclose',function(){POPUP_OPEN=false; scheduleRender();});
 }
 
 function autoLocate(){
   if(!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(function(pos){
-    setUserLL([pos.coords.latitude,pos.coords.longitude]);
-  },function(){},{maximumAge:600000,timeout:5000});
+  navigator.geolocation.getCurrentPosition(function(pos){ setUserLL([pos.coords.latitude,pos.coords.longitude]); },function(){},{maximumAge:600000,timeout:5000});
 }
 
 function makeIcon(color,ring){
-  return L.divIcon({
-    className:'hr-pin',
+  return L.divIcon({className:'hr-pin',
     html:'<div style="width:20px;height:20px;border-radius:50%;background:'+color+';border:3px solid '+ring+';box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>',
-    iconSize:[20,20], iconAnchor:[10,10]
-  });
+    iconSize:[20,20], iconAnchor:[10,10]});
 }
 
 function brandMetaByName(name){
   for(var i=0;i<INDEX.brands.length;i++) if(INDEX.brands[i].name===name) return INDEX.brands[i];
-  return {color:'#262626',ring:'#ECE70F',slug:'other',emoji:'🏪'};
+  var m = BRAND_META[name]; if(m) return {name:name,slug:m.slug,color:m.color,ring:m.ring,emoji:m.emoji};
+  return {color:'#262626',ring:'#ECE70F',slug:'other',emoji:'*'};
 }
 
-function matchesFilter(x){
-  var meta = brandMetaByName(x.b);
-  if(!ACTIVE_BRANDS.has(meta.slug)) return false;
+function matchesFilter(x,ignoreBrand){
+  if(!ignoreBrand){
+    var meta = brandMetaByName(x.b);
+    if(!ACTIVE_BRANDS.has(meta.slug)) return false;
+  }
   if(USER_LL && RADIUS_MI < 100){
     if(hav(USER_LL[0],USER_LL[1],x.lat,x.lng) > RADIUS_MI) return false;
   }
@@ -341,20 +321,9 @@ function matchesFilter(x){
     var f = next.value; next = it.next();
     if(f==='favs' && !FAVS.has(favKey)) return false;
     if(f==='open' && !isOpenNow(x.h)) return false;
-    if(f==='sun'){
-      var p = parseHoursString(x.h);
-      if(!p.Su) return false;
-    }
-    if(f==='late'){
-      var p2 = parseHoursString(x.h);
-      var t = p2[todayPrefix()];
-      if(!t || t.end < 19*60) return false;
-    }
-    if(f==='early'){
-      var p3 = parseHoursString(x.h);
-      var t2 = p3[todayPrefix()];
-      if(!t2 || t2.start > 9*60) return false;
-    }
+    if(f==='sun'){var p=parseHoursString(x.h); if(!p.Su) return false;}
+    if(f==='late'){var p2=parseHoursString(x.h); var t=p2[todayPrefix()]; if(!t || t.end<19*60) return false;}
+    if(f==='early'){var p3=parseHoursString(x.h); var t2=p3[todayPrefix()]; if(!t2 || t2.start>9*60) return false;}
   }
   return true;
 }
@@ -372,39 +341,45 @@ function popupHtml(x){
   var subBrand = x.sb ? ' <span style="color:var(--soft);font-weight:500">('+esc(x.sb)+')</span>' : '';
   return '<div class="hr-pop">'+
     '<div class="hr-pop-head">'+
-      '<h4>'+meta.emoji+' '+esc(x.b)+subBrand+'</h4>'+
+      '<h4>'+meta.emoji+' '+esc(x.b||'Return Bar')+subBrand+'</h4>'+
       '<div class="hr-pop-actions">'+
-        '<button class="hr-pop-fav '+(fav?'on':'')+'" data-fav="'+esc(favKey)+'" title="Save to favorites" type="button">'+(fav?'♥':'♡')+'</button>'+
-        '<button class="hr-pop-close" data-close-popup="1" title="Close" type="button" aria-label="Close">×</button>'+
+        '<button class="hr-pop-fav '+(fav?'on':'')+'" data-fav="'+esc(favKey)+'" title="Save to favorites" type="button">'+(fav?'&hearts;':'&#9825;')+'</button>'+
+        '<button class="hr-pop-close" data-close-popup="1" title="Close" type="button" aria-label="Close">&times;</button>'+
       '</div>'+
     '</div>'+
     '<span class="hr-pop-badge '+badgeCls+'">'+esc(statusTxt)+'</span>'+
     (addr?'<div class="hr-pop-line"><b>📍</b> '+esc(addr)+'</div>':'')+
     (x.p?'<div class="hr-pop-line"><b>📞</b> <a href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">'+esc(x.p)+'</a></div>':'')+
-    '<div class="hr-pop-line"><b>🕐</b> This week:<br><span style="color:var(--mute);font-size:11.5px;display:block;margin-top:4px">'+humanAllHours(x.h)+'</span></div>'+
+    (x.h?'<div class="hr-pop-line"><b>🕐</b> This week:<br><span style="color:var(--mute);font-size:11.5px;display:block;margin-top:4px">'+humanAllHours(x.h)+'</span></div>':'')+
     (x.d?'<div class="hr-pop-line"><b>💡</b> '+esc(x.d)+'</div>':'')+
     '<div class="hr-pop-btns">'+
-      '<a class="hr-pop-btn" href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">🧭 Google</a>'+
-      '<a class="hr-pop-btn am" href="https://maps.apple.com/?daddr='+q+'" target="_blank" rel="noopener">🍎 Apple</a>'+
-      '<a class="hr-pop-btn wz" href="https://waze.com/ul?ll='+q+'&navigate=yes" target="_blank" rel="noopener">🚗 Waze</a>'+
-      (x.p?'<a class="hr-pop-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>':'<span></span>')+
+      '<a class="hr-pop-btn" href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">Google</a>'+
+      '<a class="hr-pop-btn am" href="https://maps.apple.com/?daddr='+q+'" target="_blank" rel="noopener">Apple</a>'+
+      '<a class="hr-pop-btn wz" href="https://waze.com/ul?ll='+q+'&navigate=yes" target="_blank" rel="noopener">Waze</a>'+
+      (x.p?'<a class="hr-pop-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">Call</a>':'<span></span>')+
     '</div>'+
   '</div>';
 }
 
 function scheduleRender(){
   if(RENDER_TIMER) clearTimeout(RENDER_TIMER);
-  RENDER_TIMER = setTimeout(function(){
-    if(POPUP_OPEN){RENDER_TIMER=null;return;}
-    renderMap();
-  },25);
+  RENDER_TIMER = setTimeout(function(){ if(POPUP_OPEN){RENDER_TIMER=null;return;} renderMap(); },25);
 }
 
 function buildRadiusCache(){
   if(!USER_LL){RADIUS_CACHE={items:null,ll:null,radius:null};return;}
   RADIUS_CACHE.ll = USER_LL; RADIUS_CACHE.radius = RADIUS_MI;
   var u0=USER_LL[0],u1=USER_LL[1],r=RADIUS_MI;
-  RADIUS_CACHE.items = ALL.filter(function(x){return hav(u0,u1,x.lat,x.lng)<=r;});
+  var items = [];
+  var seen = {};
+  ACTIVE_BRANDS.forEach(function(slug){
+    var rows = BRAND_DATA[slug]; if(!rows) return;
+    for(var i=0;i<rows.length;i++){
+      var x = rows[i];
+      if(hav(u0,u1,x.lat,x.lng) <= r){ if(!seen[x.id]){seen[x.id]=1; items.push(x);} }
+    }
+  });
+  RADIUS_CACHE.items = items;
 }
 function invalidateRadiusCache(){RADIUS_CACHE.ll=null;}
 function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI;}
@@ -413,55 +388,88 @@ function renderMap(){
   if(!CLUSTER) return;
   CLUSTER.clearLayers();
   var markers = [];
-  var workingSet;
-  if(USER_LL){
-    if(!radiusCacheValid()) buildRadiusCache();
-    workingSet = RADIUS_CACHE.items || [];
-  }else{
-    workingSet = ALL;
-  }
-  for(var i=0;i<workingSet.length;i++){
-    var x = workingSet[i];
-    if(!matchesFilter(x)) continue;
-    var meta = brandMetaByName(x.b);
-    var open = isOpenNow(x.h);
-    var ring = open ? '#DCFCE7' : (meta.ring||'#FEE2E2');
-    var mk = L.marker([x.lat,x.lng],{icon:makeIcon(meta.color, ring)});
-    (function(item,m){
-      m.on('click',function(){
-        MAP.closePopup();
-        if(!m.getPopup()){
-          var mapW = MAP.getSize().x;
-          var mw = Math.min(mapW-80, window.innerWidth<600?280:340);
-          m.bindPopup(popupHtml(item),{maxWidth:mw,minWidth:220,autoPan:true,autoPanPadding:[40,60],keepInView:true,closeButton:false,autoClose:false,closeOnClick:false});
-        }
-        m.openPopup();
+  var zoom = MAP ? MAP.getZoom() : 4;
+  var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
+
+  if(!shouldRenderBrands){
+    // National zoom + no user location: show FEATURED sample only (cheap, fast)
+    for(var i=0;i<FEATURED.length;i++){
+      var x = FEATURED[i];
+      // Featured items pass if their brand chip is active + status filters pass
+      // Featured rows may lack 'h' field (we only kept id/b/c/s/lat/lng) - treat as "always valid for display"
+      var meta = brandMetaByName(x.b);
+      if(!ACTIVE_BRANDS.has(meta.slug)) continue;
+      // Favorites filter still applies
+      if(STATUS_FILTERS.has('favs')){var fk=x.id||(x.b+'|'+x.lat+'|'+x.lng); if(!FAVS.has(fk)) continue;}
+      markers.push(makeMarker(x));
+    }
+  } else {
+    // Zoomed in OR user set location: render all loaded brand data in view
+    var workingSet;
+    if(USER_LL){
+      if(!radiusCacheValid()) buildRadiusCache();
+      workingSet = RADIUS_CACHE.items || [];
+    } else {
+      // Zoomed in without location: show all loaded brand pins in viewport
+      workingSet = [];
+      ACTIVE_BRANDS.forEach(function(slug){
+        var rows = BRAND_DATA[slug]; if(!rows) return;
+        for(var k=0;k<rows.length;k++) workingSet.push(rows[k]);
       });
-    })(x,mk);
-    markers.push(mk);
+    }
+    var bounds = MAP ? MAP.getBounds() : null;
+    for(var j=0;j<workingSet.length;j++){
+      var y = workingSet[j];
+      if(!matchesFilter(y)) continue;
+      if(bounds && !USER_LL && !bounds.contains([y.lat,y.lng])) continue;
+      markers.push(makeMarker(y));
+    }
   }
   CLUSTER.addLayers(markers,{chunkedLoading:true});
   updateCounters();
   renderResultsList();
 }
 
+function makeMarker(x){
+  var meta = brandMetaByName(x.b);
+  var open = isOpenNow(x.h);
+  var ring = open ? '#DCFCE7' : (meta.ring||'#FEE2E2');
+  var mk = L.marker([x.lat,x.lng],{icon:makeIcon(meta.color, ring)});
+  (function(item,m){
+    m.on('click',function(){
+      MAP.closePopup();
+      if(!m.getPopup()){
+        var mapW = MAP.getSize().x;
+        var mw = Math.min(mapW-80, window.innerWidth<600?280:340);
+        m.bindPopup(popupHtml(item),{maxWidth:mw,minWidth:220,autoPan:true,autoPanPadding:[40,60],keepInView:true,closeButton:false,autoClose:false,closeOnClick:false});
+      }
+      m.openPopup();
+    });
+  })(x,mk);
+  return mk;
+}
+
 function updateCounters(){
-  var shown=0, open=0;
-  var workingSet;
-  if(USER_LL){
+  var shown = 0, open = 0;
+  var zoom = MAP ? MAP.getZoom() : 4;
+  var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
+  if(!shouldRenderBrands){
+    for(var i=0;i<FEATURED.length;i++){var x=FEATURED[i]; var m=brandMetaByName(x.b); if(ACTIVE_BRANDS.has(m.slug)){shown++;}}
+    open = shown; // featured rows don't have hours; treat as neutral
+  } else if(USER_LL){
     if(!radiusCacheValid()) buildRadiusCache();
-    workingSet = RADIUS_CACHE.items || [];
-  }else{
-    workingSet = ALL;
+    var ws = RADIUS_CACHE.items || [];
+    for(var k=0;k<ws.length;k++){var y=ws[k]; if(!matchesFilter(y)) continue; shown++; if(isOpenNow(y.h)) open++;}
+  } else {
+    var bounds = MAP ? MAP.getBounds() : null;
+    ACTIVE_BRANDS.forEach(function(slug){
+      var rows = BRAND_DATA[slug]; if(!rows) return;
+      for(var p=0;p<rows.length;p++){var z=rows[p]; if(bounds && !bounds.contains([z.lat,z.lng])) continue; if(!matchesFilter(z)) continue; shown++; if(isOpenNow(z.h)) open++;}
+    });
   }
-  for(var i=0;i<workingSet.length;i++){
-    var x = workingSet[i];
-    if(!matchesFilter(x)) continue;
-    shown++;
-    if(isOpenNow(x.h)) open++;
-  }
-  document.getElementById('hr-cnt-shown').textContent = shown.toLocaleString();
-  document.getElementById('hr-cnt-open').textContent = open.toLocaleString();
+  var el1 = document.getElementById('hr-cnt-shown'), el2 = document.getElementById('hr-cnt-open');
+  if(el1) el1.textContent = shown.toLocaleString();
+  if(el2) el2.textContent = open.toLocaleString();
 }
 
 function renderResultsList(){
@@ -473,21 +481,14 @@ function renderResultsList(){
   var items = [];
   if(!radiusCacheValid()) buildRadiusCache();
   var ws = RADIUS_CACHE.items || [];
-  for(var i=0;i<ws.length;i++){
-    var x = ws[i];
-    if(!matchesFilter(x)) continue;
-    items.push({x:x, dist: hav(USER_LL[0],USER_LL[1],x.lat,x.lng)});
-  }
+  for(var i=0;i<ws.length;i++){var x=ws[i]; if(!matchesFilter(x)) continue; items.push({x:x, dist: hav(USER_LL[0],USER_LL[1],x.lat,x.lng)});}
   var sortMode = document.getElementById('hr-sort').value;
   if(sortMode==='name') items.sort(function(a,b){return (a.x.b||'').localeCompare(b.x.b||'');});
   else items.sort(function(a,b){return a.dist-b.dist;});
   var capped = items.slice(0,100);
   document.getElementById('hr-results-count').textContent = items.length.toLocaleString() + (items.length>100?' (showing nearest 100)':'');
   document.getElementById('hr-results-area').textContent = 'within '+RADIUS_MI+' mi of '+(CURRENT_AREA||'your location');
-  if(!capped.length){
-    list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>';
-    return;
-  }
+  if(!capped.length){list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>'; return;}
   list.innerHTML = capped.map(renderResultCard).join('');
 }
 
@@ -503,14 +504,14 @@ function renderResultCard(it){
   var gm = 'https://www.google.com/maps/search/?api=1&query='+x.lat+','+x.lng;
   var am = 'https://maps.apple.com/?daddr='+x.lat+','+x.lng;
   var wz = 'https://waze.com/ul?ll='+x.lat+','+x.lng+'&navigate=yes';
-  var callBtn = x.p ? '<a class="hr-result-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>' : '<a class="hr-result-btn wz" href="'+wz+'" target="_blank" rel="noopener">🚗 Waze</a>';
+  var callBtn = x.p ? '<a class="hr-result-btn call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">Call</a>' : '<a class="hr-result-btn wz" href="'+wz+'" target="_blank" rel="noopener">Waze</a>';
   return '<div class="hr-result-item">'+
-    '<div class="hr-result-head"><div class="hr-result-name">'+meta.emoji+' '+esc(x.b)+(x.sb?' <span style="color:var(--soft);font-weight:500;font-size:12px">('+esc(x.sb)+')</span>':'')+'</div><span class="hr-result-badge '+badgeCls+'">'+badge+'</span></div>'+
-    '<div class="hr-result-addr">📍 '+esc(addr)+'</div>'+
-    '<div class="hr-result-meta"><b>'+esc(dist)+'</b> · '+esc(hrsLabel)+(x.p?' · '+esc(x.p):'')+'</div>'+
+    '<div class="hr-result-head"><div class="hr-result-name">'+meta.emoji+' '+esc(x.b||'')+(x.sb?' <span style="color:var(--soft);font-weight:500;font-size:12px">('+esc(x.sb)+')</span>':'')+'</div><span class="hr-result-badge '+badgeCls+'">'+badge+'</span></div>'+
+    '<div class="hr-result-addr">'+esc(addr)+'</div>'+
+    '<div class="hr-result-meta"><b>'+esc(dist)+'</b> &middot; '+esc(hrsLabel)+(x.p?' &middot; '+esc(x.p):'')+'</div>'+
     '<div class="hr-result-btns">'+
-      '<a class="hr-result-btn" href="'+gm+'" target="_blank" rel="noopener">🗺 Maps</a>'+
-      '<a class="hr-result-btn am" href="'+am+'" target="_blank" rel="noopener">🍎 Apple</a>'+
+      '<a class="hr-result-btn" href="'+gm+'" target="_blank" rel="noopener">Maps</a>'+
+      '<a class="hr-result-btn am" href="'+am+'" target="_blank" rel="noopener">Apple</a>'+
       callBtn+
     '</div>'+
   '</div>';
@@ -519,34 +520,22 @@ function renderResultCard(it){
 function renderCityGrid(){
   var g = document.getElementById('hr-city-grid');
   if(!g) return;
+  var all = allLoadedItems();
   var byCity = {};
-  for(var i=0;i<ALL.length;i++){
-    var x = ALL[i];
-    if(!x.c || !x.s) continue;
-    var k = x.c+', '+x.s;
-    if(!byCity[k]) byCity[k] = {count:0, lat:x.lat, lng:x.lng};
-    byCity[k].count++;
-  }
-  var cities = Object.keys(byCity).sort(function(a,b){return byCity[b].count - byCity[a].count;}).slice(0,24);
-  var emojis = {NY:'🗽',CA:'🌴',TX:'🤠',IL:'🌆',FL:'🏖️',GA:'🍑',NV:'🎰',AZ:'🌵',WA:'☕',CO:'⛰️',MA:'🎓',PA:'🔔',OH:'🏙️',MD:'⚓',OR:'🌲',MN:'🌾',TN:'🎸',MO:'🏙️',NC:'🏔️',MI:'🚗'};
+  for(var i=0;i<all.length;i++){var x=all[i]; if(!x.c||!x.s) continue; var k=x.c+', '+x.s; if(!byCity[k]) byCity[k]={count:0,lat:x.lat,lng:x.lng}; byCity[k].count++;}
+  var cities = Object.keys(byCity).sort(function(a,b){return byCity[b].count-byCity[a].count;}).slice(0,24);
+  var emojis = {NY:'NY',CA:'CA',TX:'TX',IL:'IL',FL:'FL',GA:'GA',NV:'NV',AZ:'AZ',WA:'WA',CO:'CO',MA:'MA',PA:'PA',OH:'OH',MD:'MD',OR:'OR',MN:'MN',TN:'TN',MO:'MO',NC:'NC',MI:'MI'};
   g.innerHTML = cities.map(function(name){
-    var d = byCity[name];
-    var st = (name.split(', ')[1]||'').trim();
-    var em = emojis[st]||'🏪';
+    var d = byCity[name]; var st = (name.split(', ')[1]||'').trim(); var em = emojis[st]||'US';
     return '<div class="hr-city" data-lat="'+d.lat+'" data-lng="'+d.lng+'" data-name="'+esc(name)+'">'+
       '<h4>'+em+' '+esc(name)+'</h4>'+
       '<div class="hr-cnt-sm">'+d.count.toLocaleString()+' Return Bars</div>'+
-      '<div class="hr-pick">Tap to zoom map here</div>'+
-    '</div>';
+      '<div class="hr-pick">Tap to zoom map here</div></div>';
   }).join('');
   g.querySelectorAll('.hr-city').forEach(function(el){
     el.addEventListener('click',function(){
-      var lat = +el.dataset.lat, lng = +el.dataset.lng, name = el.dataset.name;
-      if(MAP && !isNaN(lat) && !isNaN(lng)){
-        CURRENT_AREA = name;
-        setUserLL([lat,lng]);
-        document.getElementById('hr-map').scrollIntoView({behavior:'smooth',block:'center'});
-      }
+      var lat=+el.dataset.lat, lng=+el.dataset.lng, name=el.dataset.name;
+      if(MAP && !isNaN(lat) && !isNaN(lng)){ CURRENT_AREA=name; setUserLL([lat,lng]); document.getElementById('hr-map').scrollIntoView({behavior:'smooth',block:'center'}); }
     });
   });
 }
@@ -555,12 +544,13 @@ function setUserLL(ll){
   USER_LL = ll;
   invalidateRadiusCache();
   if(USER_MARKER) MAP.removeLayer(USER_MARKER);
-  USER_MARKER = L.circleMarker(ll,{radius:9,color:'#262626',fillColor:'#ECE70F',fillOpacity:1,weight:3}).addTo(MAP).bindPopup('📍 Your location');
+  USER_MARKER = L.circleMarker(ll,{radius:9,color:'#262626',fillColor:'#ECE70F',fillOpacity:1,weight:3}).addTo(MAP).bindPopup('Your location');
   var z = RADIUS_MI<=5?13 : RADIUS_MI<=15?12 : RADIUS_MI<=30?11 : RADIUS_MI<=50?10 : RADIUS_MI<=100?9 : 8;
   MAP.setView(ll,z);
   setTimeout(function(){if(MAP) MAP.invalidateSize();},200);
-  var nudge = document.getElementById('hr-nudge');
-  if(nudge) nudge.style.display='none';
+  var nudge = document.getElementById('hr-nudge'); if(nudge) nudge.style.display='none';
+  // Ensure all brand data is loaded for radius search
+  loadAllBrands().then(function(){ invalidateRadiusCache(); scheduleRender(); });
   scheduleRender();
 }
 
@@ -569,32 +559,35 @@ function openBrandModal(slug){
   for(var i=0;i<INDEX.brands.length;i++) if(INDEX.brands[i].slug===slug){brand=INDEX.brands[i];break;}
   if(!brand) return;
   var modal = document.getElementById('hr-brand-modal');
-  document.getElementById('hr-brand-modal-title').innerHTML = brand.emoji+' '+esc(brand.name)+' <span style="color:var(--black);background:var(--yellow);padding:2px 8px;border-radius:4px">· '+brand.count.toLocaleString()+' US bars</span>';
+  document.getElementById('hr-brand-modal-title').innerHTML = brand.emoji+' '+esc(brand.name)+' <span style="color:var(--black);background:var(--yellow);padding:2px 8px;border-radius:4px">&middot; '+brand.count.toLocaleString()+' US bars</span>';
   document.getElementById('hr-brand-modal-meta').textContent = 'Scrollable list of every '+brand.name+' Return Bar. Filter by city, state or ZIP.';
   var list = document.getElementById('hr-brand-modal-list');
-  var rows = ALL.filter(function(x){return x.b===brand.name;});
-  function render(filter){
-    var fil = (filter||'').toLowerCase().trim();
-    var f = fil ? rows.filter(function(x){return ((x.a||'')+' '+(x.c||'')+' '+(x.s||'')+' '+(x.z||'')).toLowerCase().indexOf(fil)>=0;}) : rows;
-    var top = f.slice(0,300);
-    list.innerHTML = top.map(function(x){
-      var q = x.lat+','+x.lng;
-      return '<div class="hr-loc-item">'+
-        '<div style="flex:1;min-width:0">'+
-          '<b>'+esc(x.c||'')+', '+esc(x.s||'')+' '+esc(x.z||'')+'</b>'+
-          '<div style="color:var(--mute);font-size:12px;margin-top:2px">'+esc(x.a||'')+'</div>'+
-          (x.p?'<div style="color:var(--black);font-size:12px;margin-top:2px">📞 '+esc(x.p)+'</div>':'')+
-        '</div>'+
-        '<div class="hr-loc-btns">'+
-          '<a href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">🧭 Directions</a>'+
-          (x.p?'<a class="call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">📞 Call</a>':'')+
-        '</div>'+
-      '</div>';
-    }).join('') + (f.length>300?'<div style="text-align:center;color:var(--soft);padding:10px;font-size:12px">...and '+(f.length-300).toLocaleString()+' more. Use the filter box above to narrow.</div>' : (f.length===0?'<div style="text-align:center;color:var(--soft);padding:14px">No locations match.</div>':''));
-  }
-  render('');
-  document.getElementById('hr-brand-modal-filter').oninput = function(e){render(e.target.value);};
+  list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--mute)"><span class="hr-loader"></span>Loading '+brand.count.toLocaleString()+' locations...</div>';
   modal.classList.add('on');
+  loadBrand(slug).then(function(rows){
+    rows = rows || [];
+    function render(filter){
+      var fil = (filter||'').toLowerCase().trim();
+      var f = fil ? rows.filter(function(x){return ((x.a||'')+' '+(x.c||'')+' '+(x.s||'')+' '+(x.z||'')).toLowerCase().indexOf(fil)>=0;}) : rows;
+      var top = f.slice(0,300);
+      list.innerHTML = top.map(function(x){
+        var q = x.lat+','+x.lng;
+        return '<div class="hr-loc-item">'+
+          '<div style="flex:1;min-width:0">'+
+            '<b>'+esc(x.c||'')+', '+esc(x.s||'')+' '+esc(x.z||'')+'</b>'+
+            '<div style="color:var(--mute);font-size:12px;margin-top:2px">'+esc(x.a||'')+'</div>'+
+            (x.p?'<div style="color:var(--black);font-size:12px;margin-top:2px">'+esc(x.p)+'</div>':'')+
+          '</div>'+
+          '<div class="hr-loc-btns">'+
+            '<a href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">Directions</a>'+
+            (x.p?'<a class="call" href="tel:'+esc(String(x.p).replace(/[^\d+]/g,''))+'">Call</a>':'')+
+          '</div>'+
+        '</div>';
+      }).join('') + (f.length>300?'<div style="text-align:center;color:var(--soft);padding:10px;font-size:12px">...and '+(f.length-300).toLocaleString()+' more. Use the filter box above to narrow.</div>' : (f.length===0?'<div style="text-align:center;color:var(--soft);padding:14px">No locations match.</div>':''));
+    }
+    render('');
+    document.getElementById('hr-brand-modal-filter').oninput = function(e){render(e.target.value);};
+  });
 }
 
 function runTrip(){
@@ -604,8 +597,10 @@ function runTrip(){
   var d = +document.getElementById('hr-trip-detour').value;
   if(!s || !e){out.innerHTML='<div style="color:var(--red);font-weight:700">Enter both start and end cities.</div>'; return;}
   out.innerHTML = '<div><span class="hr-loader"></span>Geocoding...</div>';
-  Promise.all([geocode(s), geocode(e)]).then(function(pts){
+  // Trip planner needs all brand data for accurate route-detour search
+  Promise.all([geocode(s), geocode(e), loadAllBrands()]).then(function(pts){
     var A = pts[0], B = pts[1];
+    var all = allLoadedItems();
     function detour(x){
       var d12 = hav(A[0],A[1],B[0],B[1]); if(d12<1) return 9999;
       var t = ((x.lat-A[0])*(B[0]-A[0]) + (x.lng-A[1])*(B[1]-A[1])) / (Math.pow(B[0]-A[0],2)+Math.pow(B[1]-A[1],2));
@@ -613,13 +608,12 @@ function runTrip(){
       var pLat = A[0]+t*(B[0]-A[0]), pLng = A[1]+t*(B[1]-A[1]);
       return hav(x.lat,x.lng, pLat,pLng);
     }
-    var hits = ALL.map(function(x){return {x:x, d:detour(x)};}).filter(function(c){return c.d<=d;}).sort(function(a,b){return a.d-b.d;}).slice(0,15);
+    var hits = all.map(function(x){return {x:x, d:detour(x)};}).filter(function(c){return c.d<=d;}).sort(function(a,b){return a.d-b.d;}).slice(0,15);
     if(!hits.length){out.innerHTML='<div style="color:var(--mute)">No Return Bars within '+d+' miles of that route. Widen tolerance and try again.</div>';return;}
     out.innerHTML = hits.map(function(c){
-      var meta = brandMetaByName(c.x.b);
-      var q = c.x.lat+','+c.x.lng;
+      var meta = brandMetaByName(c.x.b); var q = c.x.lat+','+c.x.lng;
       return '<div class="hr-trip-item">'+
-        '<span><b>'+meta.emoji+' '+esc(c.x.b)+'</b><br><span style="color:var(--mute);font-size:12px">'+esc(c.x.c||'')+', '+esc(c.x.s||'')+' · '+c.d.toFixed(1)+' mi detour</span></span>'+
+        '<span><b>'+meta.emoji+' '+esc(c.x.b||'')+'</b><br><span style="color:var(--mute);font-size:12px">'+esc(c.x.c||'')+', '+esc(c.x.s||'')+' &middot; '+c.d.toFixed(1)+' mi detour</span></span>'+
         '<a class="hr-pop-btn" style="padding:5px 10px" href="https://www.google.com/maps/dir/?api=1&destination='+q+'" target="_blank" rel="noopener">Go</a>'+
       '</div>';
     }).join('');
@@ -646,8 +640,7 @@ function wireControls(){
   document.getElementById('hr-radius').addEventListener('input',function(e){
     RADIUS_MI = +e.target.value;
     document.getElementById('hr-radius-lbl').textContent = RADIUS_MI+' mi';
-    invalidateRadiusCache();
-    scheduleRender();
+    invalidateRadiusCache(); scheduleRender();
   });
   document.getElementById('hr-btn-clear').addEventListener('click',function(){
     STATUS_FILTERS = new Set(['open']);
@@ -661,18 +654,13 @@ function wireControls(){
     USER_LL = null; CURRENT_AREA = null;
     document.getElementById('hr-loc-input').value='';
     if(MAP) MAP.setView([39.8283,-98.5795],4);
-    document.getElementById('hr-nudge').style.display='';
+    var nd = document.getElementById('hr-nudge'); if(nd) nd.style.display='';
     document.getElementById('hr-results').style.display='none';
-    invalidateRadiusCache();
-    updateBrandStatus();
-    scheduleRender();
+    invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
   });
   document.getElementById('hr-btn-geo').addEventListener('click',function(){
     if(!navigator.geolocation){alert('Geolocation not supported');return;}
-    navigator.geolocation.getCurrentPosition(function(pos){
-      CURRENT_AREA = 'your location';
-      setUserLL([pos.coords.latitude,pos.coords.longitude]);
-    },function(e){alert('Location denied: '+e.message);});
+    navigator.geolocation.getCurrentPosition(function(pos){ CURRENT_AREA='your location'; setUserLL([pos.coords.latitude,pos.coords.longitude]); },function(e){alert('Location denied: '+e.message);});
   });
   var _seq = 0;
   document.getElementById('hr-btn-search').addEventListener('click',function(){
@@ -693,16 +681,12 @@ function wireControls(){
   document.getElementById('hr-b-all').addEventListener('click',function(){
     ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
-    invalidateRadiusCache();
-    updateBrandStatus();
-    scheduleRender();
+    invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
   });
   document.getElementById('hr-b-none').addEventListener('click',function(){
     ACTIVE_BRANDS = new Set();
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
-    invalidateRadiusCache();
-    updateBrandStatus();
-    scheduleRender();
+    invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
   });
   document.querySelectorAll('[data-close]').forEach(function(el){el.addEventListener('click',function(){el.closest('.hr-modal').classList.remove('on');});});
   document.querySelectorAll('.hr-modal').forEach(function(m){m.addEventListener('click',function(e){if(e.target===m) m.classList.remove('on');});});
@@ -725,4 +709,3 @@ function waitLeaflet(){
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',waitLeaflet);
 else waitLeaflet();
 })();
-
