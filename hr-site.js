@@ -389,16 +389,26 @@ function invalidateRadiusCache(){RADIUS_CACHE.ll=null;}
 function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI;}
 
 // Build the "working set" of pins for the current state.
-// Three stable states (counter does NOT change with zoom):
-//   A. No chips, no USER_LL  → 204 featured (national overview)
-//   B. Chip(s) on, no USER_LL → full brand(s) nationwide + featured of UN-selected brands (dedup)
-//   C. USER_LL set            → brand pins within radius for ACTIVE brands + featured of un-selected brands outside radius
+// Two cases (strict — no mixing of featured with chip-selected brands):
+//   A. No chips → show only the 204 FEATURED preview
+//   B. Chip(s) on → show ONLY the selected brands' pins (no featured, no other brands)
+//      + if USER_LL is set, filter those pins to within RADIUS_MI
+// Counter stays stable as the user zooms/pans.
 function buildWorkingSet(){
   var out = [];
   var usedIds = {};
-  var selected = ACTIVE_BRANDS;
-  // 1. For each selected brand, add its full pin set (filtered by radius if USER_LL)
-  selected.forEach(function(slug){
+  if(ACTIVE_BRANDS.size === 0){
+    // State A: default preview — the 204 featured pins, hydrated with full data if brands are loaded
+    for(var k=0;k<FEATURED.length;k++){
+      var f = FEATURED[k];
+      if(usedIds[f.id]) continue;
+      usedIds[f.id]=1;
+      out.push(hydrateFeatured(f));
+    }
+    return out;
+  }
+  // State B: only the selected brand(s), filtered by radius if the user has a location
+  ACTIVE_BRANDS.forEach(function(slug){
     var rows = BRAND_DATA[slug]; if(!rows) return;
     for(var i=0;i<rows.length;i++){
       var r = rows[i];
@@ -408,16 +418,6 @@ function buildWorkingSet(){
       out.push(r);
     }
   });
-  // 2. Add featured pins for brands NOT in the selected set (so national overview stays visible for other brands)
-  for(var k=0;k<FEATURED.length;k++){
-    var f = FEATURED[k];
-    var meta = brandMetaByName(f.b);
-    if(selected.has(meta.slug)) continue; // skip featured for brands already shown in full
-    if(usedIds[f.id]) continue;
-    // With USER_LL set, keep featured regardless of distance (they are the "elsewhere" preview)
-    usedIds[f.id]=1;
-    out.push(hydrateFeatured(f));
-  }
   return out;
 }
 
