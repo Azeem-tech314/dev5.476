@@ -56,7 +56,8 @@ var RADIUS_MI = 25;
 var MAP = null, CLUSTER = null;
 var RENDER_TIMER = null, POPUP_OPEN = false;
 var RADIUS_CACHE = {items:null, ll:null, radius:null};
-var BRAND_RENDER_ZOOM = 7;          // zoom level at which brand pins start rendering (national zoom = 4)
+var BRAND_RENDER_ZOOM = 10;         // zoom level at which brand pins start rendering (national zoom = 4). 10 ~ one city in view.
+var VIEWPORT_RENDER_CAP = 500;      // hard cap for pins at viewport-render path (no USER_LL)
 
 var BRAND_META = {
   'The UPS Store':      {slug:'ups-store', color:'#351C15', ring:'#D4A574', emoji:'🟤'},
@@ -410,11 +411,16 @@ function renderMap(){
       if(!radiusCacheValid()) buildRadiusCache();
       workingSet = RADIUS_CACHE.items || [];
     } else {
-      // Zoomed in without location: show all loaded brand pins in viewport
+      // Zoomed in without location: show brand pins in viewport (bounds-filtered first for speed)
       workingSet = [];
+      var vb = MAP ? MAP.getBounds() : null;
       ACTIVE_BRANDS.forEach(function(slug){
         var rows = BRAND_DATA[slug]; if(!rows) return;
-        for(var k=0;k<rows.length;k++) workingSet.push(rows[k]);
+        for(var k=0;k<rows.length;k++){
+          var r = rows[k];
+          if(vb && !vb.contains([r.lat,r.lng])) continue;
+          workingSet.push(r);
+        }
       });
     }
     var bounds = MAP ? MAP.getBounds() : null;
@@ -423,6 +429,7 @@ function renderMap(){
       if(!matchesFilter(y)) continue;
       if(bounds && !USER_LL && !bounds.contains([y.lat,y.lng])) continue;
       markers.push(makeMarker(y));
+      if(!USER_LL && markers.length >= VIEWPORT_RENDER_CAP) break;
     }
   }
   CLUSTER.addLayers(markers,{chunkedLoading:true});
