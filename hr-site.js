@@ -244,8 +244,15 @@ function updateBrandStatus(){
   var n = ACTIVE_BRANDS.size;
   var el = document.getElementById('hr-brands-status');
   if(el) el.textContent = n ? '- '+n+' brand'+(n===1?'':'s')+' showing' : '- tap a brand or search a city to see every bar';
-  var cnt = document.getElementById('hr-cnt-brands');
-  if(cnt) cnt.textContent = n;
+  // Swap the whole "N brands on" segment so preview mode doesn't read "0 brands on" over 204 pins.
+  var wrap = document.getElementById('hr-cnt-brands-wrap');
+  if(wrap){
+    if(n > 0){
+      wrap.innerHTML = '<b id="hr-cnt-brands">'+n+'</b> brand'+(n===1?'':'s')+' on';
+    } else {
+      wrap.innerHTML = '<b id="hr-cnt-brands">preview</b> · tap a brand to filter';
+    }
+  }
 }
 
 function renderBrandGrid(){
@@ -421,15 +428,26 @@ function buildWorkingSet(){
   return out;
 }
 
+function isPreviewMode(){ return ACTIVE_BRANDS.size === 0 && !USER_LL; }
+
 function renderMap(){
   if(!CLUSTER) return;
   CLUSTER.clearLayers();
   var ws = buildWorkingSet();
+  var preview = isPreviewMode();
   var markers = [];
   for(var i=0;i<ws.length;i++){
     var y = ws[i];
-    // Status/open/sunday/late/early/favs filters (brand + radius already applied in buildWorkingSet)
-    if(!matchesFilter(y, true)) continue; // ignoreBrand=true (chip filter already baked in)
+    if(preview){
+      // Preview = unfiltered national overview; only the favorites filter still applies
+      if(STATUS_FILTERS.has('favs')){
+        var fk = y.id || (y.b+'|'+y.lat+'|'+y.lng);
+        if(!FAVS.has(fk)) continue;
+      }
+    } else {
+      // Live state — apply status/open/sun/late/early/favs filters (chip + radius already baked into ws)
+      if(!matchesFilter(y, true)) continue;
+    }
     markers.push(makeMarker(y));
   }
   CLUSTER.addLayers(markers,{chunkedLoading:true});
@@ -471,19 +489,27 @@ function updateCounters(ws){
   // Counter is bound to the working set (not the viewport). It stays stable while the user
   // zooms or pans; only chip toggles, status filters, location/search, or radius change it.
   if(!ws) ws = buildWorkingSet();
+  var preview = isPreviewMode();
   var shown = 0, open = 0;
   for(var i=0;i<ws.length;i++){
     var y = ws[i];
-    if(!matchesFilter(y, true)) continue; // chip filter already baked into ws
-    shown++;
-    if(y.h ? isOpenNow(y.h) : false) open++;
+    if(preview){
+      // Preview: no status filters (except favs), count every featured
+      if(STATUS_FILTERS.has('favs')){
+        var fk = y.id || (y.b+'|'+y.lat+'|'+y.lng);
+        if(!FAVS.has(fk)) continue;
+      }
+      shown++;
+      if(y.h ? isOpenNow(y.h) : false) open++;
+    } else {
+      if(!matchesFilter(y, true)) continue;
+      shown++;
+      if(y.h ? isOpenNow(y.h) : false) open++;
+    }
   }
-  // When Open Now filter is OFF and no hours data (featured stubs), avoid showing open=0 by default;
-  // only drop the open figure to the actual open count once brands are loaded + hours are known.
-  if(ACTIVE_BRANDS.size === 0 && !USER_LL){
-    // Pure national preview: hours aren't loaded for featured stubs — show "~" meaning preview
-    open = shown;
-  }
+  // In preview, treat the national overview count as neutral (open == shown) so the UI
+  // doesn't flicker as brand data loads and hours become known.
+  if(preview) open = shown;
   var el1 = document.getElementById('hr-cnt-shown'), el2 = document.getElementById('hr-cnt-open');
   if(el1) el1.textContent = shown.toLocaleString();
   if(el2) el2.textContent = open.toLocaleString();
