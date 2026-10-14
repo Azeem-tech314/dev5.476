@@ -56,8 +56,7 @@ var RADIUS_MI = 25;
 var MAP = null, CLUSTER = null;
 var RENDER_TIMER = null, POPUP_OPEN = false;
 var RADIUS_CACHE = {items:null, ll:null, radius:null};
-var BRAND_RENDER_ZOOM = 10;         // zoom level at which brand pins start rendering (national zoom = 4). 10 ~ one city in view.
-var VIEWPORT_RENDER_CAP = 500;      // hard cap for pins at viewport-render path (no USER_LL)
+// (zoom gate + viewport cap removed — working set is now purely state-driven)
 
 var BRAND_META = {
   'The UPS Store':      {slug:'ups-store', color:'#351C15', ring:'#D4A574', emoji:'🟤'},
@@ -288,9 +287,11 @@ function initMap(){
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(MAP);
   CLUSTER = L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:70,chunkedLoading:true,chunkInterval:200,chunkDelay:10,removeOutsideVisibleBounds:true});
   MAP.addLayer(CLUSTER);
-  MAP.on('moveend',function(){updateCounters(); scheduleRender();});
+  // No moveend re-render: the working set is state-driven (chips + USER_LL + filters + radius),
+  // so zoom/pan does not change counts and does not need to rebuild markers. Leaflet's cluster
+  // handles cluster expansion/contraction on its own.
   MAP.on('popupopen',function(){POPUP_OPEN=true;});
-  MAP.on('popupclose',function(){POPUP_OPEN=false; scheduleRender();});
+  MAP.on('popupclose',function(){POPUP_OPEN=false;});
 }
 
 function autoLocate(){
@@ -387,52 +388,52 @@ function buildRadiusCache(){
 function invalidateRadiusCache(){RADIUS_CACHE.ll=null;}
 function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI;}
 
+// Build the "working set" of pins for the current state.
+// Three stable states (counter does NOT change with zoom):
+//   A. No chips, no USER_LL  → 204 featured (national overview)
+//   B. Chip(s) on, no USER_LL → full brand(s) nationwide + featured of UN-selected brands (dedup)
+//   C. USER_LL set            → brand pins within radius for ACTIVE brands + featured of un-selected brands outside radius
+function buildWorkingSet(){
+  var out = [];
+  var usedIds = {};
+  var selected = ACTIVE_BRANDS;
+  // 1. For each selected brand, add its full pin set (filtered by radius if USER_LL)
+  selected.forEach(function(slug){
+    var rows = BRAND_DATA[slug]; if(!rows) return;
+    for(var i=0;i<rows.length;i++){
+      var r = rows[i];
+      if(USER_LL && RADIUS_MI<100 && hav(USER_LL[0],USER_LL[1],r.lat,r.lng) > RADIUS_MI) continue;
+      if(usedIds[r.id]) continue;
+      usedIds[r.id]=1;
+      out.push(r);
+    }
+  });
+  // 2. Add featured pins for brands NOT in the selected set (so national overview stays visible for other brands)
+  for(var k=0;k<FEATURED.length;k++){
+    var f = FEATURED[k];
+    var meta = brandMetaByName(f.b);
+    if(selected.has(meta.slug)) continue; // skip featured for brands already shown in full
+    if(usedIds[f.id]) continue;
+    // With USER_LL set, keep featured regardless of distance (they are the "elsewhere" preview)
+    usedIds[f.id]=1;
+    out.push(hydrateFeatured(f));
+  }
+  return out;
+}
+
 function renderMap(){
   if(!CLUSTER) return;
   CLUSTER.clearLayers();
+  var ws = buildWorkingSet();
   var markers = [];
-  var zoom = MAP ? MAP.getZoom() : 4;
-  var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
-
-  if(!shouldRenderBrands){
-    // National zoom + no user location: show FEATURED sample (always visible, like breakfast's indies)
-    for(var i=0;i<FEATURED.length;i++){
-      var x = FEATURED[i];
-      // Favorites filter still applies
-      if(STATUS_FILTERS.has('favs')){var fk=x.id||(x.b+'|'+x.lat+'|'+x.lng); if(!FAVS.has(fk)) continue;}
-      // Hydrate featured row with its full brand record (hours, phone, address) if brand data is loaded
-      markers.push(makeMarker(hydrateFeatured(x)));
-    }
-  } else {
-    // Zoomed in OR user set location: render all loaded brand data in view
-    var workingSet;
-    if(USER_LL){
-      if(!radiusCacheValid()) buildRadiusCache();
-      workingSet = RADIUS_CACHE.items || [];
-    } else {
-      // Zoomed in without location: show brand pins in viewport (bounds-filtered first for speed)
-      workingSet = [];
-      var vb = MAP ? MAP.getBounds() : null;
-      ACTIVE_BRANDS.forEach(function(slug){
-        var rows = BRAND_DATA[slug]; if(!rows) return;
-        for(var k=0;k<rows.length;k++){
-          var r = rows[k];
-          if(vb && !vb.contains([r.lat,r.lng])) continue;
-          workingSet.push(r);
-        }
-      });
-    }
-    var bounds = MAP ? MAP.getBounds() : null;
-    for(var j=0;j<workingSet.length;j++){
-      var y = workingSet[j];
-      if(!matchesFilter(y)) continue;
-      if(bounds && !USER_LL && !bounds.contains([y.lat,y.lng])) continue;
-      markers.push(makeMarker(y));
-      if(!USER_LL && markers.length >= VIEWPORT_RENDER_CAP) break;
-    }
+  for(var i=0;i<ws.length;i++){
+    var y = ws[i];
+    // Status/open/sunday/late/early/favs filters (brand + radius already applied in buildWorkingSet)
+    if(!matchesFilter(y, true)) continue; // ignoreBrand=true (chip filter already baked in)
+    markers.push(makeMarker(y));
   }
   CLUSTER.addLayers(markers,{chunkedLoading:true});
-  updateCounters();
+  updateCounters(ws);
   renderResultsList();
 }
 
@@ -466,24 +467,22 @@ function makeMarker(x){
   return mk;
 }
 
-function updateCounters(){
+function updateCounters(ws){
+  // Counter is bound to the working set (not the viewport). It stays stable while the user
+  // zooms or pans; only chip toggles, status filters, location/search, or radius change it.
+  if(!ws) ws = buildWorkingSet();
   var shown = 0, open = 0;
-  var zoom = MAP ? MAP.getZoom() : 4;
-  var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
-  if(!shouldRenderBrands){
-    // Featured sample is always visible on the map; count it fully
-    shown = FEATURED.length;
-    open = shown; // featured rows don't carry hours; treat the preview count as neutral
-  } else if(USER_LL){
-    if(!radiusCacheValid()) buildRadiusCache();
-    var ws = RADIUS_CACHE.items || [];
-    for(var k=0;k<ws.length;k++){var y=ws[k]; if(!matchesFilter(y)) continue; shown++; if(isOpenNow(y.h)) open++;}
-  } else {
-    var bounds = MAP ? MAP.getBounds() : null;
-    ACTIVE_BRANDS.forEach(function(slug){
-      var rows = BRAND_DATA[slug]; if(!rows) return;
-      for(var p=0;p<rows.length;p++){var z=rows[p]; if(bounds && !bounds.contains([z.lat,z.lng])) continue; if(!matchesFilter(z)) continue; shown++; if(isOpenNow(z.h)) open++;}
-    });
+  for(var i=0;i<ws.length;i++){
+    var y = ws[i];
+    if(!matchesFilter(y, true)) continue; // chip filter already baked into ws
+    shown++;
+    if(y.h ? isOpenNow(y.h) : false) open++;
+  }
+  // When Open Now filter is OFF and no hours data (featured stubs), avoid showing open=0 by default;
+  // only drop the open figure to the actual open count once brands are loaded + hours are known.
+  if(ACTIVE_BRANDS.size === 0 && !USER_LL){
+    // Pure national preview: hours aren't loaded for featured stubs — show "~" meaning preview
+    open = shown;
   }
   var el1 = document.getElementById('hr-cnt-shown'), el2 = document.getElementById('hr-cnt-open');
   if(el1) el1.textContent = shown.toLocaleString();
