@@ -244,13 +244,13 @@ function updateBrandStatus(){
   var n = ACTIVE_BRANDS.size;
   var el = document.getElementById('hr-brands-status');
   if(el) el.textContent = n ? '- '+n+' brand'+(n===1?'':'s')+' showing' : '- tap a brand or search a city to see every bar';
-  // Swap the whole "N brands on" segment so preview mode doesn't read "0 brands on" over 204 pins.
+  // Swap the whole "N brands on" segment. Preview covers all 4 brands by design, so say so.
   var wrap = document.getElementById('hr-cnt-brands-wrap');
   if(wrap){
     if(n > 0){
       wrap.innerHTML = '<b id="hr-cnt-brands">'+n+'</b> brand'+(n===1?'':'s')+' on';
     } else {
-      wrap.innerHTML = '<b id="hr-cnt-brands">preview</b> · tap a brand to filter';
+      wrap.innerHTML = '<b id="hr-cnt-brands">4</b> brands · tap one to narrow';
     }
   }
 }
@@ -490,29 +490,28 @@ function updateCounters(ws){
   // zooms or pans; only chip toggles, status filters, location/search, or radius change it.
   if(!ws) ws = buildWorkingSet();
   var preview = isPreviewMode();
+  var openFilterOn = STATUS_FILTERS.has('open');
   var shown = 0, open = 0;
   for(var i=0;i<ws.length;i++){
     var y = ws[i];
     if(preview){
-      // Preview: no status filters (except favs), count every featured
+      // Preview: pins never drop by Open Now — the Open Now chip is a display toggle here.
       if(STATUS_FILTERS.has('favs')){
         var fk = y.id || (y.b+'|'+y.lat+'|'+y.lng);
         if(!FAVS.has(fk)) continue;
       }
-      shown++;
-      if(y.h ? isOpenNow(y.h) : false) open++;
     } else {
       if(!matchesFilter(y, true)) continue;
-      shown++;
-      if(y.h ? isOpenNow(y.h) : false) open++;
     }
+    shown++;
+    if(y.h && isOpenNow(y.h)) open++;
   }
-  // In preview, treat the national overview count as neutral (open == shown) so the UI
-  // doesn't flicker as brand data loads and hours become known.
-  if(preview) open = shown;
   var el1 = document.getElementById('hr-cnt-shown'), el2 = document.getElementById('hr-cnt-open');
   if(el1) el1.textContent = shown.toLocaleString();
   if(el2) el2.textContent = open.toLocaleString();
+  // Hide the "N open right now · " segment when the Open Now chip is OFF
+  var openWrap = document.getElementById('hr-cnt-open-wrap');
+  if(openWrap) openWrap.style.display = openFilterOn ? '' : 'none';
 }
 
 function renderResultsList(){
