@@ -48,7 +48,7 @@ var FEATURED = [];                  // ~200 pins loaded first (national coverage
 var BRAND_DATA = {};                // slug -> array of rows (lazy)
 var BRAND_LOADING = {};             // slug -> Promise (in-flight)
 var INDEX = {brands:[], total:0};
-var ACTIVE_BRANDS = new Set();      // slugs user wants visible (default: all 4)
+var ACTIVE_BRANDS = new Set();      // empty by default (like breakfast's chains). Activated by search/locate/chip-click.
 var FAVS = (function(){try{return new Set(JSON.parse(localStorage.getItem('hr_favs')||'[]'));}catch(e){return new Set();}})();
 var STATUS_FILTERS = new Set(['open']);
 var USER_LL = null, USER_MARKER = null, CURRENT_AREA = null;
@@ -165,7 +165,8 @@ function boot(){
       var meta = SLUG_TO_META[b.slug];
       if(meta){ b.color = meta.color; b.ring = meta.ring; b.emoji = meta.emoji; }
     });
-    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    // Breakfast model: brand chips start OFF. User activates by chip click, search, or location.
+    ACTIVE_BRANDS = new Set();
     renderBrandChips();
     renderBrandGrid();
     updateBrandStatus();
@@ -216,7 +217,8 @@ function boot(){
 function renderBrandChips(){
   var wrap = document.getElementById('hr-brands');
   wrap.innerHTML = INDEX.brands.map(function(x){
-    return '<span class="hr-bchip on" data-brand="'+esc(x.slug)+'"><span>'+x.emoji+' '+esc(x.name)+'</span><span class="hr-cn">'+x.count.toLocaleString()+'</span></span>';
+    var on = ACTIVE_BRANDS.has(x.slug) ? ' on' : '';
+    return '<span class="hr-bchip'+on+'" data-brand="'+esc(x.slug)+'"><span>'+x.emoji+' '+esc(x.name)+'</span><span class="hr-cn">'+x.count.toLocaleString()+'</span></span>';
   }).join('');
   wrap.querySelectorAll('[data-brand]').forEach(function(el){
     el.addEventListener('click',function(){toggleBrandChip(el.dataset.brand);});
@@ -242,7 +244,7 @@ function toggleBrandChip(slug){
 function updateBrandStatus(){
   var n = ACTIVE_BRANDS.size;
   var el = document.getElementById('hr-brands-status');
-  if(el) el.textContent = n ? '- '+n+' brand'+(n===1?'':'s')+' showing' : '- no brands selected';
+  if(el) el.textContent = n ? '- '+n+' brand'+(n===1?'':'s')+' showing' : '- tap a brand or search a city to see every bar';
   var cnt = document.getElementById('hr-cnt-brands');
   if(cnt) cnt.textContent = n;
 }
@@ -393,16 +395,13 @@ function renderMap(){
   var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
 
   if(!shouldRenderBrands){
-    // National zoom + no user location: show FEATURED sample only (cheap, fast)
+    // National zoom + no user location: show FEATURED sample (always visible, like breakfast's indies)
     for(var i=0;i<FEATURED.length;i++){
       var x = FEATURED[i];
-      // Featured items pass if their brand chip is active + status filters pass
-      // Featured rows may lack 'h' field (we only kept id/b/c/s/lat/lng) - treat as "always valid for display"
-      var meta = brandMetaByName(x.b);
-      if(!ACTIVE_BRANDS.has(meta.slug)) continue;
       // Favorites filter still applies
       if(STATUS_FILTERS.has('favs')){var fk=x.id||(x.b+'|'+x.lat+'|'+x.lng); if(!FAVS.has(fk)) continue;}
-      markers.push(makeMarker(x));
+      // Hydrate featured row with its full brand record (hours, phone, address) if brand data is loaded
+      markers.push(makeMarker(hydrateFeatured(x)));
     }
   } else {
     // Zoomed in OR user set location: render all loaded brand data in view
@@ -437,6 +436,16 @@ function renderMap(){
   renderResultsList();
 }
 
+function hydrateFeatured(x){
+  // If brand data for this row is already in memory, upgrade the featured stub to the full row
+  if(x && x.h) return x; // already has hours → already a full row
+  var meta = brandMetaByName(x.b);
+  var rows = BRAND_DATA[meta.slug];
+  if(!rows) return x; // brand not yet loaded; show basic popup
+  for(var i=0;i<rows.length;i++){ if(rows[i].id === x.id) return rows[i]; }
+  return x;
+}
+
 function makeMarker(x){
   var meta = brandMetaByName(x.b);
   var open = isOpenNow(x.h);
@@ -445,11 +454,12 @@ function makeMarker(x){
   (function(item,m){
     m.on('click',function(){
       MAP.closePopup();
-      if(!m.getPopup()){
-        var mapW = MAP.getSize().x;
-        var mw = Math.min(mapW-80, window.innerWidth<600?280:340);
-        m.bindPopup(popupHtml(item),{maxWidth:mw,minWidth:220,autoPan:true,autoPanPadding:[40,60],keepInView:true,closeButton:false,autoClose:false,closeOnClick:false});
-      }
+      // Re-hydrate at click time: if the brand file arrived AFTER the marker was placed, upgrade now
+      var full = hydrateFeatured(item);
+      var mapW = MAP.getSize().x;
+      var mw = Math.min(mapW-80, window.innerWidth<600?280:340);
+      if(m.getPopup()){ m.unbindPopup(); }
+      m.bindPopup(popupHtml(full),{maxWidth:mw,minWidth:220,autoPan:true,autoPanPadding:[40,60],keepInView:true,closeButton:false,autoClose:false,closeOnClick:false});
       m.openPopup();
     });
   })(x,mk);
@@ -461,8 +471,9 @@ function updateCounters(){
   var zoom = MAP ? MAP.getZoom() : 4;
   var shouldRenderBrands = !!USER_LL || zoom >= BRAND_RENDER_ZOOM;
   if(!shouldRenderBrands){
-    for(var i=0;i<FEATURED.length;i++){var x=FEATURED[i]; var m=brandMetaByName(x.b); if(ACTIVE_BRANDS.has(m.slug)){shown++;}}
-    open = shown; // featured rows don't have hours; treat as neutral
+    // Featured sample is always visible on the map; count it fully
+    shown = FEATURED.length;
+    open = shown; // featured rows don't carry hours; treat the preview count as neutral
   } else if(USER_LL){
     if(!radiusCacheValid()) buildRadiusCache();
     var ws = RADIUS_CACHE.items || [];
@@ -549,6 +560,12 @@ function renderCityGrid(){
 
 function setUserLL(ll){
   USER_LL = ll;
+  // Breakfast model: as soon as the user has a location, activate all brands (if none active yet)
+  if(ACTIVE_BRANDS.size === 0 && INDEX.brands && INDEX.brands.length){
+    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
+    updateBrandStatus();
+  }
   invalidateRadiusCache();
   if(USER_MARKER) MAP.removeLayer(USER_MARKER);
   USER_MARKER = L.circleMarker(ll,{radius:9,color:'#262626',fillColor:'#ECE70F',fillOpacity:1,weight:3}).addTo(MAP).bindPopup('Your location');
@@ -655,8 +672,8 @@ function wireControls(){
     document.getElementById('hr-radius').value = 25;
     document.getElementById('hr-radius-lbl').textContent = '25 mi';
     document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(x){x.classList.toggle('on', x.dataset.f==='open');});
-    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
-    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
+    ACTIVE_BRANDS = new Set();
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
     if(USER_MARKER){MAP.removeLayer(USER_MARKER); USER_MARKER=null;}
     USER_LL = null; CURRENT_AREA = null;
     document.getElementById('hr-loc-input').value='';
