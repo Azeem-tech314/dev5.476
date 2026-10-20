@@ -165,7 +165,14 @@ function boot(){
       if(meta){ b.color = meta.color; b.ring = meta.ring; b.emoji = meta.emoji; }
     });
     // Breakfast model: brand chips start OFF. User activates by chip click, search, or location.
+    // Brand pages can preset one or more chips by setting window.HR_BRAND_FILTER before this script loads.
+    // Accepts a single slug ("ups-store") or an array (["ups-store","ulta"]).
     ACTIVE_BRANDS = new Set();
+    try{
+      var hbf = window.HR_BRAND_FILTER;
+      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); }
+      else if(Array.isArray(hbf)){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); }
+    }catch(e){}
     renderBrandChips();
     renderBrandGrid();
     updateBrandStatus();
