@@ -683,6 +683,10 @@ function startClock(){
 }
 
 function wireControls(){
+  // Safe helper: attach a handler only if the target exists. Brand/retailer pages
+  // omit optional widgets (trip modal, deadline tracker, etc.) so hr-site.js must
+  // not crash on a missing element.
+  function on(id, ev, fn){ var el = typeof id === 'string' ? document.getElementById(id) : id; if(el) el.addEventListener(ev, fn); }
   document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(el){
     el.addEventListener('click',function(){
       var f = el.dataset.f;
@@ -691,54 +695,55 @@ function wireControls(){
       scheduleRender();
     });
   });
-  document.getElementById('hr-sort').addEventListener('change',function(){scheduleRender();});
-  document.getElementById('hr-radius').addEventListener('input',function(e){
+  on('hr-sort','change',function(){scheduleRender();});
+  on('hr-radius','input',function(e){
     RADIUS_MI = +e.target.value;
-    document.getElementById('hr-radius-lbl').textContent = RADIUS_MI+' mi';
+    var lbl=document.getElementById('hr-radius-lbl'); if(lbl) lbl.textContent = RADIUS_MI+' mi';
     invalidateRadiusCache(); scheduleRender();
   });
-  document.getElementById('hr-btn-clear').addEventListener('click',function(){
+  on('hr-btn-clear','click',function(){
     STATUS_FILTERS = new Set(['open']);
     RADIUS_MI = 25;
-    document.getElementById('hr-radius').value = 25;
-    document.getElementById('hr-radius-lbl').textContent = '25 mi';
+    var r=document.getElementById('hr-radius'); if(r) r.value = 25;
+    var rl=document.getElementById('hr-radius-lbl'); if(rl) rl.textContent = '25 mi';
     document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(x){x.classList.toggle('on', x.dataset.f==='open');});
     ACTIVE_BRANDS = new Set();
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
     if(USER_MARKER){MAP.removeLayer(USER_MARKER); USER_MARKER=null;}
     USER_LL = null; CURRENT_AREA = null;
-    document.getElementById('hr-loc-input').value='';
+    var li=document.getElementById('hr-loc-input'); if(li) li.value='';
     if(MAP) MAP.setView([39.8283,-98.5795],4);
     var nd = document.getElementById('hr-nudge'); if(nd) nd.style.display='';
-    document.getElementById('hr-results').style.display='none';
+    var rs=document.getElementById('hr-results'); if(rs) rs.style.display='none';
     invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
   });
-  document.getElementById('hr-btn-geo').addEventListener('click',function(){
+  on('hr-btn-geo','click',function(){
     if(!navigator.geolocation){alert('Geolocation not supported');return;}
     navigator.geolocation.getCurrentPosition(function(pos){ CURRENT_AREA='your location'; setUserLL([pos.coords.latitude,pos.coords.longitude]); },function(e){alert('Location denied: '+e.message);});
   });
   var _seq = 0;
-  document.getElementById('hr-btn-search').addEventListener('click',function(){
-    var q = document.getElementById('hr-loc-input').value.trim(); if(!q) return;
+  on('hr-btn-search','click',function(){
+    var inp=document.getElementById('hr-loc-input'); if(!inp) return;
+    var q = inp.value.trim(); if(!q) return;
     var mySeq = ++_seq;
     geocode(q).then(function(ll){if(mySeq!==_seq) return; CURRENT_AREA = q; setUserLL(ll);})
               .catch(function(e){if(mySeq!==_seq) return; alert('Search failed: '+e.message);});
   });
-  document.getElementById('hr-loc-input').addEventListener('keydown',function(e){if(e.key==='Enter') document.getElementById('hr-btn-search').click();});
-  document.getElementById('hr-btn-fs').addEventListener('click',function(){
+  on('hr-loc-input','keydown',function(e){if(e.key==='Enter'){var btn=document.getElementById('hr-btn-search'); if(btn) btn.click();}});
+  on('hr-btn-fs','click',function(){
     var el = document.getElementById('hr-map');
-    if(!document.fullscreenElement){if(el.requestFullscreen) el.requestFullscreen();}
+    if(!document.fullscreenElement){if(el && el.requestFullscreen) el.requestFullscreen();}
     else{document.exitFullscreen();}
-    setTimeout(function(){MAP && MAP.invalidateSize();},300);
+    setTimeout(function(){if(MAP) MAP.invalidateSize();},300);
   });
-  document.getElementById('hr-btn-trip').addEventListener('click',function(){document.getElementById('hr-trip-modal').classList.add('on');});
-  document.getElementById('hr-trip-go').addEventListener('click',runTrip);
-  document.getElementById('hr-b-all').addEventListener('click',function(){
+  on('hr-btn-trip','click',function(){var m=document.getElementById('hr-trip-modal'); if(m) m.classList.add('on');});
+  on('hr-trip-go','click',runTrip);
+  on('hr-b-all','click',function(){
     ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
     invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
   });
-  document.getElementById('hr-b-none').addEventListener('click',function(){
+  on('hr-b-none','click',function(){
     ACTIVE_BRANDS = new Set();
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
     invalidateRadiusCache(); updateBrandStatus(); scheduleRender();
