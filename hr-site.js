@@ -167,11 +167,13 @@ function boot(){
     // Breakfast model: brand chips start OFF. User activates by chip click, search, or location.
     // Brand pages can preset one or more chips by setting window.HR_BRAND_FILTER before this script loads.
     // Accepts a single slug ("ups-store") or an array (["ups-store","ulta"]).
+    // On a brand page, also default Open Now OFF so the visible count matches the baked total
+    // in the H1 and trust tiles (user can turn Open Now on to filter down).
     ACTIVE_BRANDS = new Set();
     try{
       var hbf = window.HR_BRAND_FILTER;
-      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); }
-      else if(Array.isArray(hbf)){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); }
+      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); STATUS_FILTERS.delete('open'); }
+      else if(Array.isArray(hbf) && hbf.length){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); STATUS_FILTERS.delete('open'); }
     }catch(e){}
     renderBrandChips();
     renderBrandGrid();
