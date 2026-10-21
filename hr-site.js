@@ -454,15 +454,7 @@ function buildWorkingSet(){
   return out;
 }
 
-function isPreviewMode(){
-  // Preview-mode = pins don't drop by Open Now; Open Now becomes a display-only sub-count.
-  // Fires on homepage (no chips, no location) AND on any brand page (HR_BRAND_FILTER set + no location).
-  // Once the user searches / locates (USER_LL set), strict filter takes over.
-  if(USER_LL) return false;
-  if(ACTIVE_BRANDS.size === 0) return true;
-  if(window.HR_BRAND_FILTER && !Array.isArray(window.HR_BRAND_FILTER)) return true;
-  return false;
-}
+function isPreviewMode(){ return ACTIVE_BRANDS.size === 0 && !USER_LL; }
 
 function renderMap(){
   if(!CLUSTER) return;
