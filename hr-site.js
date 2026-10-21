@@ -224,13 +224,28 @@ function boot(){
 
 function renderBrandChips(){
   var wrap = document.getElementById('hr-brands');
-  wrap.innerHTML = INDEX.brands.map(function(x){
+  // Brand/retailer pages: HR_BRAND_FILTER = "slug" (string) scopes the map to that one brand
+  // and renders only its chip. The other 3 brand chips are hidden since they can't be toggled on.
+  var only = (typeof window.HR_BRAND_FILTER === 'string' && window.HR_BRAND_FILTER) ? window.HR_BRAND_FILTER : null;
+  var brands = only ? INDEX.brands.filter(function(x){ return x.slug === only; }) : INDEX.brands;
+  wrap.innerHTML = brands.map(function(x){
     var on = ACTIVE_BRANDS.has(x.slug) ? ' on' : '';
     return '<span class="hr-bchip'+on+'" data-brand="'+esc(x.slug)+'"><span>'+x.emoji+' '+esc(x.name)+'</span><span class="hr-cn">'+x.count.toLocaleString()+'</span></span>';
   }).join('');
   wrap.querySelectorAll('[data-brand]').forEach(function(el){
     el.addEventListener('click',function(){toggleBrandChip(el.dataset.brand);});
   });
+  // On single-brand pages, Show All / Hide All are pointless (only one chip exists).
+  if(only){
+    var ba = document.querySelector('.hr-b-actions');
+    if(ba) ba.style.display = 'none';
+    var hdr = document.querySelector('.hr-brands-hdr');
+    // Reword the header label to match the single-brand mode
+    if(hdr){
+      var label = hdr.querySelector('b');
+      if(label) label.textContent = '🏪 This map';
+    }
+  }
 }
 
 function toggleBrandChip(slug){
