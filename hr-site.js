@@ -214,6 +214,8 @@ function boot(){
         });
         return true;
       };
+      // Expose selected functions so brand pages (and tests) can trigger them from inline buttons
+      window.openBrandModal = openBrandModal;
       window.__HR_READY=true;
     }catch(e){}
   }).catch(function(e){
