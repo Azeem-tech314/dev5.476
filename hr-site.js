@@ -172,8 +172,8 @@ function boot(){
     ACTIVE_BRANDS = new Set();
     try{
       var hbf = window.HR_BRAND_FILTER;
-      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); STATUS_FILTERS.delete('open'); }
-      else if(Array.isArray(hbf) && hbf.length){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); STATUS_FILTERS.delete('open'); }
+      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); }
+      else if(Array.isArray(hbf) && hbf.length){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); }
     }catch(e){}
     renderBrandChips();
     renderBrandGrid();
@@ -454,7 +454,15 @@ function buildWorkingSet(){
   return out;
 }
 
-function isPreviewMode(){ return ACTIVE_BRANDS.size === 0 && !USER_LL; }
+function isPreviewMode(){
+  // Preview-mode = pins don't drop by Open Now; Open Now becomes a display-only sub-count.
+  // Fires on homepage (no chips, no location) AND on any brand page (HR_BRAND_FILTER set + no location).
+  // Once the user searches / locates (USER_LL set), strict filter takes over.
+  if(USER_LL) return false;
+  if(ACTIVE_BRANDS.size === 0) return true;
+  if(window.HR_BRAND_FILTER && !Array.isArray(window.HR_BRAND_FILTER)) return true;
+  return false;
+}
 
 function renderMap(){
   if(!CLUSTER) return;
