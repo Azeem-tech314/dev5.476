@@ -69,7 +69,23 @@ Object.keys(BRAND_META).forEach(function(name){ var m=BRAND_META[name]; SLUG_TO_
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function pad(n){return n<10?'0'+n:''+n;}
-function nowMins(){var d=new Date();return d.getHours()*60+d.getMinutes();}
+function nowMins(tz){
+  // Minutes since local midnight. If a tz (IANA zone like "America/New_York") is passed,
+  // return the current wall-clock time in THAT zone, so a Pakistan browser sees that a NYC
+  // UPS Store is "open" at NYC's 11 AM even when the browser clock reads 8:50 PM.
+  var d = new Date();
+  if(!tz) return d.getHours()*60 + d.getMinutes();
+  try{
+    var parts = new Intl.DateTimeFormat('en-US',{timeZone:tz, hour:'2-digit', minute:'2-digit', hour12:false}).formatToParts(d);
+    var hh=0, mm=0;
+    for(var i=0;i<parts.length;i++){
+      if(parts[i].type==='hour')   hh = parseInt(parts[i].value,10) || 0;
+      if(parts[i].type==='minute') mm = parseInt(parts[i].value,10) || 0;
+    }
+    if(hh === 24) hh = 0; // some locales emit 24:00
+    return hh*60 + mm;
+  }catch(e){ return d.getHours()*60 + d.getMinutes(); }
+}
 function parseHM(s){if(!s)return 0;var p=String(s).split(':');return (+p[0]||0)*60+(+p[1]||0);}
 function fmt12(mins){var h=Math.floor(mins/60)%24,m=mins%60,ap=h>=12?'PM':'AM',h12=((h+11)%12)+1;return h12+':'+pad(m)+' '+ap;}
 function fmtClock(){var d=new Date(),h=d.getHours(),m=d.getMinutes(),ap=h>=12?'PM':'AM',h12=((h+11)%12)+1;return h12+':'+pad(m)+' '+ap;}
@@ -93,9 +109,19 @@ function parseHoursString(h){
   }
   return out;
 }
-function todayPrefix(){ return DAY_PREFIX[new Date().getDay()]; }
-function isOpenNow(h){var p=parseHoursString(h);var t=p[todayPrefix()];if(!t)return false;var n=nowMins();return n>=t.start && n<t.end;}
-function todayHoursLabel(h){var p=parseHoursString(h);var t=p[todayPrefix()];if(!t)return 'Closed today';if(t.end-t.start>=1439)return 'Open 24 hours';var n=nowMins();if(n<t.start)return 'Opens '+fmt12(t.start);if(n>=t.end)return 'Closed. Opens tomorrow';return 'Open now. Closes '+fmt12(t.end);}
+function todayPrefix(tz){
+  var d = new Date();
+  if(!tz) return DAY_PREFIX[d.getDay()];
+  try{
+    var wk = new Intl.DateTimeFormat('en-US',{timeZone:tz, weekday:'short'}).format(d);
+    var map = {Sun:'Su',Mon:'Mo',Tue:'Tu',Wed:'We',Thu:'Th',Fri:'Fr',Sat:'Sa'};
+    return map[wk] || DAY_PREFIX[d.getDay()];
+  }catch(e){ return DAY_PREFIX[d.getDay()]; }
+}
+// isOpenNow(hoursString, storeTz?) — passes the store's own IANA tz so cross-timezone
+// visitors (e.g. Pakistan browsing NYC bars) see the correct open/closed state.
+function isOpenNow(h, tz){var p=parseHoursString(h);var t=p[todayPrefix(tz)];if(!t)return false;var n=nowMins(tz);return n>=t.start && n<t.end;}
+function todayHoursLabel(h, tz){var p=parseHoursString(h);var t=p[todayPrefix(tz)];if(!t)return 'Closed today';if(t.end-t.start>=1439)return 'Open 24 hours';var n=nowMins(tz);if(n<t.start)return 'Opens '+fmt12(t.start);if(n>=t.end)return 'Closed. Opens tomorrow';return 'Open now. Closes '+fmt12(t.end);}
 function humanAllHours(h){var p=parseHoursString(h);var dn={Su:'Sun',Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat'};var out=[];var order=['Mo','Tu','We','Th','Fr','Sa','Su'];for(var i=0;i<order.length;i++){var d=order[i],e=p[d];if(e)out.push(dn[d]+': '+fmt12(e.start)+' - '+fmt12(e.end));else out.push(dn[d]+': Closed');}return out.join('<br>');}
 
 var CITY_SNAPS = {
@@ -357,7 +383,7 @@ function matchesFilter(x,ignoreBrand){
   while(!next.done){
     var f = next.value; next = it.next();
     if(f==='favs' && !FAVS.has(favKey)) return false;
-    if(f==='open' && !isOpenNow(x.h)) return false;
+    if(f==='open' && !isOpenNow(x.h, x.tz)) return false;
     if(f==='sun'){var p=parseHoursString(x.h); if(!p.Su) return false;}
     if(f==='late'){var p2=parseHoursString(x.h); var t=p2[todayPrefix()]; if(!t || t.end<19*60) return false;}
     if(f==='early'){var p3=parseHoursString(x.h); var t2=p3[todayPrefix()]; if(!t2 || t2.start>9*60) return false;}
@@ -367,9 +393,9 @@ function matchesFilter(x,ignoreBrand){
 
 function popupHtml(x){
   var meta = brandMetaByName(x.b);
-  var open = isOpenNow(x.h);
+  var open = isOpenNow(x.h, x.tz);
   var badgeCls = open ? 'open' : 'closed';
-  var statusTxt = todayHoursLabel(x.h);
+  var statusTxt = todayHoursLabel(x.h, x.tz);
   var addrParts = [x.a, x.c, x.s, x.z].filter(Boolean);
   var addr = addrParts.length ? addrParts.join(', ') : '';
   var q = x.lat+','+x.lng;
@@ -493,7 +519,7 @@ function hydrateFeatured(x){
 
 function makeMarker(x){
   var meta = brandMetaByName(x.b);
-  var open = isOpenNow(x.h);
+  var open = isOpenNow(x.h, x.tz);
   var ring = open ? '#DCFCE7' : (meta.ring||'#FEE2E2');
   var mk = L.marker([x.lat,x.lng],{icon:makeIcon(meta.color, ring)});
   (function(item,m){
@@ -530,7 +556,7 @@ function updateCounters(ws){
       if(!matchesFilter(y, true)) continue;
     }
     shown++;
-    if(y.h && isOpenNow(y.h)) open++;
+    if(y.h && isOpenNow(y.h, y.tz)) open++;
   }
   var el1 = document.getElementById('hr-cnt-shown'), el2 = document.getElementById('hr-cnt-open');
   if(el1) el1.textContent = shown.toLocaleString();
@@ -563,12 +589,12 @@ function renderResultsList(){
 function renderResultCard(it){
   var x = it.x;
   var meta = brandMetaByName(x.b);
-  var open = isOpenNow(x.h);
+  var open = isOpenNow(x.h, x.tz);
   var badge = open ? 'OPEN' : 'CLOSED';
   var badgeCls = open ? 'open' : 'closed';
   var addr = [x.a, x.c].filter(Boolean).join(', ') || x.c || '';
   var dist = it.dist.toFixed(1)+' mi away';
-  var hrsLabel = todayHoursLabel(x.h);
+  var hrsLabel = todayHoursLabel(x.h, x.tz);
   var gm = 'https://www.google.com/maps/search/?api=1&query='+x.lat+','+x.lng;
   var am = 'https://maps.apple.com/?daddr='+x.lat+','+x.lng;
   var wz = 'https://waze.com/ul?ll='+x.lat+','+x.lng+'&navigate=yes';
