@@ -43,7 +43,9 @@
 (function(){
 'use strict';
 
-var DATA_BASE = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@main/';
+// Pages may pin the data to a commit (window.HR_DATA_BASE) so every visitor gets the same data version;
+// the homepage sets nothing and keeps @main.
+var DATA_BASE = window.HR_DATA_BASE || 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@main/';
 var FEATURED = [];                  // ~200 pins loaded first (national coverage)
 var BRAND_DATA = {};                // slug -> array of rows (lazy)
 var BRAND_LOADING = {};             // slug -> Promise (in-flight)
