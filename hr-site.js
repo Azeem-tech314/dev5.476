@@ -395,7 +395,7 @@ function brandMetaByName(name){
   return {color:'#262626',ring:'#ECE70F',slug:'other',emoji:'*'};
 }
 
-function matchesFilter(x,ignoreBrand){
+function matchesFilter(x,ignoreBrand,skipOpen){
   if(!ignoreBrand){
     var meta = brandMetaByName(x.b);
     if(!ACTIVE_BRANDS.has(meta.slug)) return false;
@@ -408,7 +408,7 @@ function matchesFilter(x,ignoreBrand){
   while(!next.done){
     var f = next.value; next = it.next();
     if(f==='favs' && !FAVS.has(favKey)) return false;
-    if(f==='open' && !isOpenNow(x.h, x.tz)) return false;
+    if(f==='open' && !skipOpen && !isOpenNow(x.h, x.tz)) return false;
     if(f==='sun'){var p=parseHoursString(x.h); if(!p.Su) return false;}
     if(f==='late'){var p2=parseHoursString(x.h); var t=p2[todayPrefix()]; if(!t || t.end<19*60) return false;}
     if(f==='early'){var p3=parseHoursString(x.h); var t2=p3[todayPrefix()]; if(!t2 || t2.start>9*60) return false;}
@@ -505,7 +505,15 @@ function buildWorkingSet(){
   return out;
 }
 
-function isPreviewMode(){ return ACTIVE_BRANDS.size === 0 && !USER_LL; }
+// Preview = no location yet and the page's default brands (homepage: none; brand page: its own brand).
+// In preview every pin stays on the map and Open Now only counts, so a brand page is never empty at night.
+function isPreviewMode(){
+  if(USER_LL) return false;
+  var pb = pageBrandSet();
+  if(pb.size !== ACTIVE_BRANDS.size) return false;
+  var same = true; pb.forEach(function(s){ if(!ACTIVE_BRANDS.has(s)) same = false; });
+  return same;
+}
 
 function renderMap(){
   if(!CLUSTER) return;
@@ -515,7 +523,10 @@ function renderMap(){
   var markers = [];
   for(var i=0;i<ws.length;i++){
     var y = ws[i];
-    if(preview){
+    if(preview && ACTIVE_BRANDS.size){
+      // Brand-page preview: every filter except Open Now (Open Now only counts until a location is set)
+      if(!matchesFilter(y, true, true)) continue;
+    } else if(preview){
       // Preview = unfiltered national overview; only the favorites filter still applies
       if(STATUS_FILTERS.has('favs')){
         var fk = y.id || (y.b+'|'+y.lat+'|'+y.lng);
@@ -571,7 +582,9 @@ function updateCounters(ws){
   var shown = 0, open = 0;
   for(var i=0;i<ws.length;i++){
     var y = ws[i];
-    if(preview){
+    if(preview && ACTIVE_BRANDS.size){
+      if(!matchesFilter(y, true, true)) continue;
+    } else if(preview){
       // Preview: pins never drop by Open Now — the Open Now chip is a display toggle here.
       if(STATUS_FILTERS.has('favs')){
         var fk = y.id || (y.b+'|'+y.lat+'|'+y.lng);
