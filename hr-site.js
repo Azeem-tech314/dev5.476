@@ -54,6 +54,7 @@ var ACTIVE_BRANDS = new Set();      // empty by default (like breakfast's chains
 var FAVS = (function(){try{return new Set(JSON.parse(localStorage.getItem('hr_favs')||'[]'));}catch(e){return new Set();}})();
 var STATUS_FILTERS = new Set(['open']);
 var USER_LL = null, USER_MARKER = null, CURRENT_AREA = null;
+var STATE_AREA = null;   // 2-letter code while a state search is active (e.g. 'TX'), else null
 var RADIUS_MI = 25;
 var MAP = null, CLUSTER = null;
 var RENDER_TIMER = null, POPUP_OPEN = false;
@@ -149,10 +150,40 @@ var CITY_SNAPS = {
   'detroit':[42.3314,-83.0458],'st louis':[38.627,-90.1994],'kansas city':[39.0997,-94.5786],
   'pittsburgh':[40.4406,-79.9959],'cincinnati':[39.1031,-84.512]
 };
+var US_STATES = {AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',CT:'Connecticut',DE:'Delaware',
+  DC:'Washington, DC',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',IL:'Illinois',IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',
+  LA:'Louisiana',ME:'Maine',MD:'Maryland',MA:'Massachusetts',MI:'Michigan',MN:'Minnesota',MS:'Mississippi',MO:'Missouri',MT:'Montana',
+  NE:'Nebraska',NV:'Nevada',NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',ND:'North Dakota',
+  OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',RI:'Rhode Island',SC:'South Carolina',SD:'South Dakota',TN:'Tennessee',
+  TX:'Texas',UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',WV:'West Virginia',WI:'Wisconsin',WY:'Wyoming'};
+var STATE_BY_NAME = (function(){ var o = {}; for(var k in US_STATES) o[US_STATES[k].toLowerCase()] = k; o['washington dc']='DC'; o['district of columbia']='DC'; o['nb']='NE'; return o; })();
+// State code for a free-text state ("TX", "texas", "Texas state") or null
+function stateCode(t){
+  t = String(t||'').toLowerCase().replace(/[.,]/g,' ').replace(/\bstate of\b|\bstate\b/g,' ').replace(/\s+/g,' ').trim();
+  if(!t) return null;
+  if(/^[a-z]{2}$/.test(t) && US_STATES[t.toUpperCase()]) return t.toUpperCase();
+  return STATE_BY_NAME[t] || null;
+}
+// A search that is only a state ("Texas", "TX", "New York State"). Plain "New York" stays the city.
+function stateQuery(q){
+  var raw = String(q||'').trim().toLowerCase();
+  if(raw === 'new york' || raw === 'new york ny' || raw === 'new york, ny') return null;
+  return stateCode(raw);
+}
+// Row state, normalized once ("CALIFORNIA" -> "CA", typo "NB" -> "NE")
+function rowState(x){ if(x._st === undefined){ x._st = stateCode(x.s) || String(x.s||'').toUpperCase(); } return x._st; }
+var SNAP_ST = {'new york':'NY','los angeles':'CA','chicago':'IL','houston':'TX','phoenix':'AZ','philadelphia':'PA','san antonio':'TX',
+  'san diego':'CA','dallas':'TX','austin':'TX','san jose':'CA','jacksonville':'FL','fort worth':'TX','columbus':'OH','charlotte':'NC',
+  'san francisco':'CA','indianapolis':'IN','seattle':'WA','denver':'CO','washington':'DC','boston':'MA','nashville':'TN','baltimore':'MD',
+  'portland':'OR','las vegas':'NV','miami':'FL','atlanta':'GA','minneapolis':'MN','orlando':'FL','tampa':'FL','detroit':'MI',
+  'st louis':'MO','kansas city':'MO','pittsburgh':'PA','cincinnati':'OH'};
 function normalizeCityQuery(q){return String(q||'').toLowerCase().trim().replace(/,.*/,'').replace(/\s+/g,' ');}
 function geocode(q){
   var key = normalizeCityQuery(q);
-  if(CITY_SNAPS[key]) return Promise.resolve(CITY_SNAPS[key].slice());
+  // Use the built-in city only when the state matches ("Portland, ME" must not land in Oregon)
+  var suffix = (String(q).split(',')[1]||'').trim();
+  var sfx = suffix ? stateCode(suffix) : null;
+  if(CITY_SNAPS[key] && (!suffix || sfx === SNAP_ST[key] || (key==='washington' && sfx==='DC'))) return Promise.resolve(CITY_SNAPS[key].slice());
   var url = 'https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=8&countrycodes=us&q='+encodeURIComponent(q);
   return fetch(url,{headers:{'Accept-Language':'en'}}).then(function(r){return r.json();}).then(function(a){
     if(!a||!a.length) throw new Error('No results');
@@ -176,9 +207,17 @@ function loadBrand(slug){
   }).catch(function(e){delete BRAND_LOADING[slug]; console.warn('load fail',slug,e); return null;});
   return BRAND_LOADING[slug];
 }
-function loadAllBrands(){ return Promise.all(INDEX.brands.map(function(b){return loadBrand(b.slug);})); }
+function loadAllBrands(){
+  // Brand pages need only their own brand file(s); the homepage loads all four.
+  var pb = pageBrandSet();
+  var slugs = pb.size ? Array.from(pb) : INDEX.brands.map(function(b){return b.slug;});
+  return Promise.all(slugs.map(function(s){return loadBrand(s);}));
+}
 function allLoadedItems(){
-  // Union of all loaded brand data + featured (for trip planner, city grid, modal)
+  // Union of all loaded brand data + featured (for trip planner, city grid, modal).
+  // Brand pages: only their own brand's rows (featured pins mix all brands).
+  var pb = pageBrandSet();
+  if(pb.size){ var own = []; pb.forEach(function(s){ if(BRAND_DATA[s]) own = own.concat(BRAND_DATA[s]); }); return own; }
   var out = FEATURED.slice();
   var seen = {}; for(var i=0;i<out.length;i++){seen[out[i].id]=1;}
   INDEX.brands.forEach(function(b){
@@ -400,7 +439,9 @@ function matchesFilter(x,ignoreBrand,skipOpen){
     var meta = brandMetaByName(x.b);
     if(!ACTIVE_BRANDS.has(meta.slug)) return false;
   }
-  if(USER_LL && RADIUS_MI < 100){
+  if(STATE_AREA){
+    if(rowState(x) !== STATE_AREA) return false;
+  } else if(USER_LL && RADIUS_MI < 100){
     if(hav(USER_LL[0],USER_LL[1],x.lat,x.lng) > RADIUS_MI) return false;
   }
   var favKey = x.id || (x.b+'|'+x.lat+'|'+x.lng);
@@ -456,7 +497,15 @@ function scheduleRender(){
 
 function buildRadiusCache(){
   if(!USER_LL){RADIUS_CACHE={items:null,ll:null,radius:null};return;}
-  RADIUS_CACHE.ll = USER_LL; RADIUS_CACHE.radius = RADIUS_MI;
+  RADIUS_CACHE.ll = USER_LL; RADIUS_CACHE.radius = RADIUS_MI; RADIUS_CACHE.state = STATE_AREA;
+  if(STATE_AREA){
+    var sItems = [], sSeen = {};
+    ACTIVE_BRANDS.forEach(function(slug){
+      var rows = BRAND_DATA[slug]; if(!rows) return;
+      for(var i=0;i<rows.length;i++){ var y = rows[i]; if(rowState(y) === STATE_AREA && !sSeen[y.id]){ sSeen[y.id]=1; sItems.push(y); } }
+    });
+    RADIUS_CACHE.items = sItems; return;
+  }
   var u0=USER_LL[0],u1=USER_LL[1],r=RADIUS_MI;
   var items = [];
   var seen = {};
@@ -470,7 +519,7 @@ function buildRadiusCache(){
   RADIUS_CACHE.items = items;
 }
 function invalidateRadiusCache(){RADIUS_CACHE.ll=null;}
-function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI;}
+function radiusCacheValid(){return RADIUS_CACHE.ll===USER_LL && RADIUS_CACHE.radius===RADIUS_MI && RADIUS_CACHE.state===STATE_AREA;}
 
 // Build the "working set" of pins for the current state.
 // Two cases (strict — no mixing of featured with chip-selected brands):
@@ -496,7 +545,8 @@ function buildWorkingSet(){
     var rows = BRAND_DATA[slug]; if(!rows) return;
     for(var i=0;i<rows.length;i++){
       var r = rows[i];
-      if(USER_LL && RADIUS_MI<100 && hav(USER_LL[0],USER_LL[1],r.lat,r.lng) > RADIUS_MI) continue;
+      if(STATE_AREA){ if(rowState(r) !== STATE_AREA) continue; }
+      else if(USER_LL && RADIUS_MI<100 && hav(USER_LL[0],USER_LL[1],r.lat,r.lng) > RADIUS_MI) continue;
       if(usedIds[r.id]) continue;
       usedIds[r.id]=1;
       out.push(r);
@@ -616,10 +666,12 @@ function renderResultsList(){
   for(var i=0;i<ws.length;i++){var x=ws[i]; if(!matchesFilter(x)) continue; items.push({x:x, dist: hav(USER_LL[0],USER_LL[1],x.lat,x.lng)});}
   var sortMode = document.getElementById('hr-sort').value;
   if(sortMode==='name') items.sort(function(a,b){return (a.x.b||'').localeCompare(b.x.b||'');});
+  else if(STATE_AREA) items.sort(function(a,b){return (a.x.c||'').localeCompare(b.x.c||'') || (a.x.a||'').localeCompare(b.x.a||'');});
   else items.sort(function(a,b){return a.dist-b.dist;});
   var capped = items.slice(0,100);
-  document.getElementById('hr-results-count').textContent = items.length.toLocaleString() + (items.length>100?' (showing nearest 100)':'');
-  document.getElementById('hr-results-area').textContent = 'within '+RADIUS_MI+' mi of '+(CURRENT_AREA||'your location');
+  var areaTxt = STATE_AREA ? 'in '+US_STATES[STATE_AREA] : 'within '+RADIUS_MI+' mi';
+  document.getElementById('hr-results-count').textContent = items.length.toLocaleString() + (items.length>100?(STATE_AREA?' (showing the first 100, A to Z by city)':' (showing nearest 100)'):'');
+  document.getElementById('hr-results-area').textContent = STATE_AREA ? areaTxt + ' (search a city or ZIP to sort by distance)' : areaTxt+' of '+(CURRENT_AREA||'your location');
   if(!capped.length){
     // Open Now hides everything (e.g. US night-time): say so and offer the closed bars.
     var closedN = 0;
@@ -629,11 +681,12 @@ function renderResultsList(){
       STATUS_FILTERS.add('open');
     }
     if(closedN){
-      list.innerHTML = '<div class="hr-result-empty">'+closedN.toLocaleString()+' Return Bar'+(closedN>1?'s are':' is')+' within '+RADIUS_MI+' mi, but none are open right now. <button type="button" class="hr-btn" id="hr-show-closed">Show all '+closedN.toLocaleString()+' with hours</button></div>';
+      list.innerHTML = '<div class="hr-result-empty">'+closedN.toLocaleString()+' Return Bar'+(closedN>1?'s are':' is')+' '+areaTxt+', but none are open right now. <button type="button" class="hr-btn" id="hr-show-closed">Show all '+closedN.toLocaleString()+' with hours</button></div>';
       var sc = document.getElementById('hr-show-closed');
       if(sc) sc.addEventListener('click',function(){var oc=document.querySelector('.hr-fchip[data-f="open"]'); if(oc) oc.click();});
       return;
     }
+    if(STATE_AREA && !ws.length){ list.innerHTML = '<div class="hr-result-empty">There are no Return Bars on this map in '+esc(US_STATES[STATE_AREA])+'. Try a neighboring state, or search a city or ZIP to see the closest ones.</div>'; return; }
     list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>'; return;
   }
   list.innerHTML = capped.map(renderResultCard).join('');
@@ -646,7 +699,7 @@ function renderResultCard(it){
   var badge = open ? 'OPEN' : 'CLOSED';
   var badgeCls = open ? 'open' : 'closed';
   var addr = [x.a, x.c].filter(Boolean).join(', ') || x.c || '';
-  var dist = it.dist.toFixed(1)+' mi away';
+  var dist = STATE_AREA ? (x.z ? 'ZIP '+x.z : '') : it.dist.toFixed(1)+' mi away';  // state search: no distance from the state center
   var hrsLabel = todayHoursLabel(x.h, x.tz);
   var gm = 'https://www.google.com/maps/search/?api=1&query='+x.lat+','+x.lng;
   var am = 'https://maps.apple.com/?daddr='+x.lat+','+x.lng;
@@ -690,7 +743,33 @@ function renderCityGrid(){
   });
 }
 
+// State search: every store of the active brand(s) in that state, map fitted to them
+function setStateArea(code){
+  if(ACTIVE_BRANDS.size === 0 && INDEX.brands && INDEX.brands.length){
+    ACTIVE_BRANDS = pageBrandSet();
+    if(ACTIVE_BRANDS.size === 0) ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.toggle('on', ACTIVE_BRANDS.has(c.dataset.brand));});
+    updateBrandStatus();
+  }
+  return loadAllBrands().then(function(){
+    var pts = [];
+    ACTIVE_BRANDS.forEach(function(slug){ (BRAND_DATA[slug]||[]).forEach(function(y){ if(rowState(y) === code) pts.push([y.lat,y.lng]); }); });
+    STATE_AREA = code; CURRENT_AREA = US_STATES[code];
+    if(USER_MARKER){ MAP.removeLayer(USER_MARKER); USER_MARKER = null; }
+    if(pts.length){
+      var bnd = L.latLngBounds(pts);
+      USER_LL = [bnd.getCenter().lat, bnd.getCenter().lng];
+      MAP.fitBounds(bnd, {padding:[24,24], maxZoom:11});
+    } else {
+      var c0 = MAP.getCenter(); USER_LL = [c0.lat, c0.lng];
+    }
+    var nudge = document.getElementById('hr-nudge'); if(nudge) nudge.style.display='none';
+    invalidateRadiusCache(); scheduleRender();
+  });
+}
+
 function setUserLL(ll){
+  STATE_AREA = null;
   USER_LL = ll;
   // Breakfast model: as soon as the user has a location, activate all brands (if none active yet)
   if(ACTIVE_BRANDS.size === 0 && INDEX.brands && INDEX.brands.length){
@@ -812,7 +891,7 @@ function wireControls(){
     ACTIVE_BRANDS = pageBrandSet();
     document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.toggle('on', ACTIVE_BRANDS.has(c.dataset.brand));});
     if(USER_MARKER){MAP.removeLayer(USER_MARKER); USER_MARKER=null;}
-    USER_LL = null; CURRENT_AREA = null;
+    USER_LL = null; CURRENT_AREA = null; STATE_AREA = null;
     var li=document.getElementById('hr-loc-input'); if(li) li.value='';
     if(MAP) MAP.setView([39.8283,-98.5795],4);
     var nd = document.getElementById('hr-nudge'); if(nd) nd.style.display='';
@@ -828,6 +907,8 @@ function wireControls(){
     var inp=document.getElementById('hr-loc-input'); if(!inp) return;
     var q = inp.value.trim(); if(!q) return;
     var mySeq = ++_seq;
+    var sc = stateQuery(q);
+    if(sc){ setStateArea(sc); return; }
     geocode(q).then(function(ll){if(mySeq!==_seq) return; CURRENT_AREA = q; setUserLL(ll);})
               .catch(function(e){if(mySeq!==_seq) return; alert('Search failed: '+e.message);});
   });
