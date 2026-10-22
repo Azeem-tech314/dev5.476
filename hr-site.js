@@ -186,6 +186,16 @@ function allLoadedItems(){
   return out;
 }
 
+// Brands preset by the page (window.HR_BRAND_FILTER). Empty on the homepage.
+function pageBrandSet(){
+  var out = new Set();
+  try{
+    var hbf = window.HR_BRAND_FILTER;
+    if(typeof hbf === 'string' && hbf){ out.add(hbf); }
+    else if(Array.isArray(hbf) && hbf.length){ hbf.forEach(function(s){ if(s) out.add(s); }); }
+  }catch(e){}
+  return out;
+}
 function boot(){
   var nudge = document.getElementById('hr-nudge');
   if(nudge) nudge.innerHTML = '<span class="hr-loader"></span>Loading map...';
@@ -204,12 +214,7 @@ function boot(){
     // Accepts a single slug ("ups-store") or an array (["ups-store","ulta"]).
     // On a brand page, also default Open Now OFF so the visible count matches the baked total
     // in the H1 and trust tiles (user can turn Open Now on to filter down).
-    ACTIVE_BRANDS = new Set();
-    try{
-      var hbf = window.HR_BRAND_FILTER;
-      if(typeof hbf === 'string' && hbf){ ACTIVE_BRANDS.add(hbf); }
-      else if(Array.isArray(hbf) && hbf.length){ hbf.forEach(function(s){ if(s) ACTIVE_BRANDS.add(s); }); }
-    }catch(e){}
+    ACTIVE_BRANDS = pageBrandSet();
     renderBrandChips();
     renderBrandGrid();
     updateBrandStatus();
@@ -594,7 +599,22 @@ function renderResultsList(){
   var capped = items.slice(0,100);
   document.getElementById('hr-results-count').textContent = items.length.toLocaleString() + (items.length>100?' (showing nearest 100)':'');
   document.getElementById('hr-results-area').textContent = 'within '+RADIUS_MI+' mi of '+(CURRENT_AREA||'your location');
-  if(!capped.length){list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>'; return;}
+  if(!capped.length){
+    // Open Now hides everything (e.g. US night-time): say so and offer the closed bars.
+    var closedN = 0;
+    if(STATUS_FILTERS.has('open')){
+      STATUS_FILTERS.delete('open');
+      for(var k=0;k<ws.length;k++){ if(matchesFilter(ws[k])) closedN++; }
+      STATUS_FILTERS.add('open');
+    }
+    if(closedN){
+      list.innerHTML = '<div class="hr-result-empty">'+closedN.toLocaleString()+' Return Bar'+(closedN>1?'s are':' is')+' within '+RADIUS_MI+' mi, but none are open right now. <button type="button" class="hr-btn" id="hr-show-closed">Show all '+closedN.toLocaleString()+' with hours</button></div>';
+      var sc = document.getElementById('hr-show-closed');
+      if(sc) sc.addEventListener('click',function(){var oc=document.querySelector('.hr-fchip[data-f="open"]'); if(oc) oc.click();});
+      return;
+    }
+    list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>'; return;
+  }
   list.innerHTML = capped.map(renderResultCard).join('');
 }
 
@@ -650,8 +670,9 @@ function setUserLL(ll){
   USER_LL = ll;
   // Breakfast model: as soon as the user has a location, activate all brands (if none active yet)
   if(ACTIVE_BRANDS.size === 0 && INDEX.brands && INDEX.brands.length){
-    ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
-    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.add('on');});
+    ACTIVE_BRANDS = pageBrandSet();
+    if(ACTIVE_BRANDS.size === 0) ACTIVE_BRANDS = new Set(INDEX.brands.map(function(b){return b.slug;}));
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.toggle('on', ACTIVE_BRANDS.has(c.dataset.brand));});
     updateBrandStatus();
   }
   invalidateRadiusCache();
@@ -764,8 +785,8 @@ function wireControls(){
     var r=document.getElementById('hr-radius'); if(r) r.value = 25;
     var rl=document.getElementById('hr-radius-lbl'); if(rl) rl.textContent = '25 mi';
     document.querySelectorAll('#hr-filters-status .hr-fchip').forEach(function(x){x.classList.toggle('on', x.dataset.f==='open');});
-    ACTIVE_BRANDS = new Set();
-    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.remove('on');});
+    ACTIVE_BRANDS = pageBrandSet();
+    document.querySelectorAll('.hr-bchip').forEach(function(c){c.classList.toggle('on', ACTIVE_BRANDS.has(c.dataset.brand));});
     if(USER_MARKER){MAP.removeLayer(USER_MARKER); USER_MARKER=null;}
     USER_LL = null; CURRENT_AREA = null;
     var li=document.getElementById('hr-loc-input'); if(li) li.value='';
