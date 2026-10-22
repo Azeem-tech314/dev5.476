@@ -225,7 +225,13 @@ function boot(){
     autoLocate();
     // Background: fetch all 4 brand files in parallel. Each triggers scheduleRender when done.
     loadAllBrands().then(function(){ renderCityGrid(); });
-    if(nudge) nudge.innerHTML = 'Tap <b>My Location</b> or search a city or ZIP to see every Happy Returns bar within 25 miles. Showing a national sample at this zoom - zoom in or search to see all 10,017.';
+    if(nudge){
+      // Brand pages name their own brand and total; the homepage keeps the network-wide line.
+      var pb = pageBrandSet(), pbName = '', pbTotal = 0;
+      INDEX.brands.forEach(function(b){ if(pb.has(b.slug)){ pbName = pbName ? 'Happy Returns' : b.name; pbTotal += b.count; } });
+      if(pbTotal) nudge.innerHTML = 'Tap <b>My Location</b> or search a city or ZIP to see every Return Bar at '+esc(pbName)+' within 25 miles. Zoom in or search to see all '+pbTotal.toLocaleString()+'.';
+      else nudge.innerHTML = 'Tap <b>My Location</b> or search a city or ZIP to see every Happy Returns bar within 25 miles. Showing a national sample at this zoom - zoom in or search to see all 10,017.';
+    }
     // Window hooks for tests
     try{
       window.MAP=MAP; window.CLUSTER=CLUSTER; window.INDEX=INDEX;
@@ -647,6 +653,9 @@ function renderCityGrid(){
   var g = document.getElementById('hr-city-grid');
   if(!g) return;
   var all = allLoadedItems();
+  // Brand pages count only their own brand's bars.
+  var pb = pageBrandSet();
+  if(pb.size){ all = []; pb.forEach(function(s){ if(BRAND_DATA[s]) all = all.concat(BRAND_DATA[s]); }); }
   var byCity = {};
   for(var i=0;i<all.length;i++){var x=all[i]; if(!x.c||!x.s) continue; var k=x.c+', '+x.s; if(!byCity[k]) byCity[k]={count:0,lat:x.lat,lng:x.lng}; byCity[k].count++;}
   var cities = Object.keys(byCity).sort(function(a,b){return byCity[b].count-byCity[a].count;}).slice(0,24);
