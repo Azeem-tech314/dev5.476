@@ -185,13 +185,40 @@ function geocode(q){
   var sfx = suffix ? stateCode(suffix) : null;
   if(CITY_SNAPS[key] && (!suffix || sfx === SNAP_ST[key] || (key==='washington' && sfx==='DC'))) return Promise.resolve(CITY_SNAPS[key].slice());
   var url = 'https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=8&countrycodes=us&q='+encodeURIComponent(q);
-  return fetch(url,{headers:{'Accept-Language':'en'}}).then(function(r){return r.json();}).then(function(a){
+  function osm(){ return fetch(url,{headers:{'Accept-Language':'en'}}).then(function(r){ if(!r.ok) throw new Error('OSM '+r.status); return r.json(); }).then(pickOsm); }
+  // OpenStreetMap's free server sometimes refuses or times out: retry once, then use our own city/ZIP table
+  return osm()
+    .catch(function(){ return new Promise(function(res){ setTimeout(res, 1100); }).then(osm); })
+    .catch(function(){ return localGeocode(q); });
+}
+// Fallback place lookup from hr-geo.json (every city and ZIP that has a Return Bar), loaded only when needed
+var GEO_URL = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@e7ee8c1/hr-geo.json', _GEO = null;
+function localGeocode(q){
+  if(!_GEO) _GEO = fetch(GEO_URL).then(function(r){ return r.json(); });
+  return _GEO.then(function(G){
+    var t = String(q||'').toLowerCase().replace(/\./g,'').replace(/\s+/g,' ').trim();
+    var zm = t.match(/\b(\d{5})\b/);
+    if(zm){
+      if(G.z[zm[1]]) return G.z[zm[1]].slice();
+      var n = +zm[1], bz = null, bd = 1e9;
+      for(var k in G.z){ var dd = Math.abs(+k - n); if(dd < bd){ bd = dd; bz = k; } }
+      if(bz && bd < 200) return G.z[bz].slice();
+    }
+    var parts = t.split(','), c = parts[0].trim(), st = parts[1] ? stateCode(parts[1]) : null;
+    var m = !st && c.match(/^(.*) ([a-z]{2})$/);
+    if(m && US_STATES[m[2].toUpperCase()]){ c = m[1].trim(); st = m[2].toUpperCase(); }
+    c = c.replace(/^saint /,'st ').replace(/^mt /,'mount ');
+    if(st && G.g[c+'|'+st]) return G.g[c+'|'+st].slice();
+    if(!st && G.c[c]) return G.g[G.c[c]].slice();
+    throw new Error('No results');
+  });
+}
+function pickOsm(a){
     if(!a||!a.length) throw new Error('No results');
     var CT={city:6,town:5,village:3,municipality:5,administrative:4,county:2,borough:3,suburb:2,neighbourhood:1,hamlet:1};
     var scored=a.map(function(x){var t=x.type||'',cls=x.class||'',base=CT[t]||0;if(cls==='place'||cls==='boundary')base+=1;if(cls==='tourism'||cls==='amenity'||cls==='building'||cls==='shop')base-=3;var imp=+x.importance||0;return{r:x,s:base*10+imp*5};});
     scored.sort(function(a,b){return b.s-a.s;});
     return [+scored[0].r.lat,+scored[0].r.lon];
-  });
 }
 
 /* ---- Data loading ---- */
@@ -687,6 +714,21 @@ function renderResultsList(){
       return;
     }
     if(STATE_AREA && !ws.length){ list.innerHTML = '<div class="hr-result-empty">There are no Return Bars on this map in '+esc(US_STATES[STATE_AREA])+'. Try a neighboring state, or search a city or ZIP to see the closest ones.</div>'; return; }
+    if(!STATE_AREA && !ws.length){
+      // Nothing inside the radius at all (e.g. no Staples near Austin): show the closest ones instead of "remove a filter"
+      var near = [];
+      ACTIVE_BRANDS.forEach(function(slug){ (BRAND_DATA[slug]||[]).forEach(function(y){ near.push({x:y, dist: hav(USER_LL[0],USER_LL[1],y.lat,y.lng)}); }); });
+      near.sort(function(a,b){return a.dist-b.dist;});
+      var label = 'Return Bars';
+      var pb = pageBrandSet();
+      if(pb.size === 1) INDEX.brands.forEach(function(br){ if(pb.has(br.slug)) label = br.name+' Return Bars'; });
+      if(near.length){
+        list.innerHTML = '<div class="hr-result-empty">No '+esc(label)+' within '+RADIUS_MI+' mi of '+esc(CURRENT_AREA||'your location')+'. The closest '+(near.length>1?'are':'is')+' '+Math.round(near[0].dist)+' mi away:</div>'+
+          near.slice(0,3).map(renderResultCard).join('')+
+          (pb.size ? '<div class="hr-result-empty">Your Happy Returns QR code also works at any other Return Bar, such as a nearby UPS Store.</div>' : '');
+        return;
+      }
+    }
     list.innerHTML = '<div class="hr-result-empty">No Return Bars match the current filters. Widen the radius, remove a filter, or hit Reset.</div>'; return;
   }
   list.innerHTML = capped.map(renderResultCard).join('');
@@ -910,7 +952,7 @@ function wireControls(){
     var sc = stateQuery(q);
     if(sc){ setStateArea(sc); return; }
     geocode(q).then(function(ll){if(mySeq!==_seq) return; CURRENT_AREA = q; setUserLL(ll);})
-              .catch(function(e){if(mySeq!==_seq) return; alert('Search failed: '+e.message);});
+              .catch(function(){if(mySeq!==_seq) return; alert("We couldn't find \""+q+"\". Try a city and state (for example Austin, TX) or a 5-digit ZIP.");});
   });
   on('hr-loc-input','keydown',function(e){if(e.key==='Enter'){var btn=document.getElementById('hr-btn-search'); if(btn) btn.click();}});
   on('hr-btn-fs','click',function(){
