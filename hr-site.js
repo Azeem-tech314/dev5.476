@@ -122,7 +122,10 @@ function parseHoursRaw(h){
     var m = p.match(/^(Mo|Tu|We|Th|Fr|Sa|Su)\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/i);
     if(m){
       var day = m[1].charAt(0).toUpperCase()+m[1].charAt(1).toLowerCase();
-      out[day] = {start: parseHM(m[2]), end: parseHM(m[3]), raw: m[2]+'-'+m[3]};
+      var st = parseHM(m[2]), en = parseHM(m[3]);
+      // "00:00-00:00" (or any end <= start) means closed that day: some Ship Centers list closed Sundays this way.
+      // No store in the data has overnight hours, so nothing open past midnight is lost.
+      if(en > st) out[day] = {start: st, end: en, raw: m[2]+'-'+m[3]};
     } else if(/24\/7|24 hours/i.test(p)){
       for(var j=0;j<DAY_PREFIX.length;j++) out[DAY_PREFIX[j]] = {start:0, end:1440, raw:'24 hours'};
     }
@@ -192,7 +195,7 @@ function geocode(q){
     .catch(function(){ return localGeocode(q); });
 }
 // Fallback place lookup from hr-geo.json (every city and ZIP that has a Return Bar), loaded only when needed
-var GEO_URL = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@e7ee8c1/hr-geo.json', _GEO = null;
+var GEO_URL = 'https://cdn.jsdelivr.net/gh/Azeem-tech314/dev5.476@cd7b7c2/hr-geo.json', _GEO = null;
 function localGeocode(q){
   if(!_GEO) _GEO = fetch(GEO_URL).then(function(r){ return r.json(); });
   return _GEO.then(function(G){
